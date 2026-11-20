@@ -16,7 +16,7 @@
 #include "milvus-storage/reader.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format.h"
-#include "iceberg/iceberg_bridge.h"
+#include "iceberg_bridge.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
 #include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
@@ -188,9 +188,9 @@ TEST(SourceFormatReaderTest, RealParquetRetainedReaderRenewsAndGuardsCachedStrea
   auto filesystem = fs::AzureFileSystem::Make(options);
   ASSERT_TRUE(filesystem.ok());
   options = fs::AzureOptions{};
-  auto raw = std::make_shared<parquet::ParquetFormatReader>(
-      *filesystem, "tables/team/table/data.parquet", std::make_shared<api::Properties>(),
-      std::vector<std::string>{"value"}, nullptr, (*buffer)->size(), 0);
+  auto raw =
+      std::make_shared<parquet::ParquetFormatReader>(*filesystem, "tables/team/table/data.parquet", api::Properties{},
+                                                     std::vector<std::string>{"value"}, nullptr, (*buffer)->size(), 0);
   auto reader = GuardSourceFormatReader(raw, context);
   ASSERT_TRUE(reader->open().ok());
   auto clone = reader->clone_reader();
@@ -328,7 +328,7 @@ TEST(SourceFormatReaderTest, NativeLanceReaderRetainsContextAcrossRenewalAndIsol
   auto values = builder.Finish();
   ASSERT_TRUE(values.ok());
   auto schema = arrow::schema({arrow::field("value", arrow::int64())});
-  lance::LanceTableWriter writer("fixture.lance", schema, local_properties);
+  lance::LanceTableWriter writer("fixture.lance", schema, *local_properties);
   ASSERT_TRUE(writer.Write(arrow::RecordBatch::Make(schema, expected.size(), {*values})).ok());
   auto written = writer.Close();
   ASSERT_TRUE(written.ok()) << written.status();
@@ -421,8 +421,7 @@ TEST(SourceFormatReaderTest, NativeIcebergPlansFullMetadataTreeAndReadsThroughSo
   const std::string remote_root = kRoot;
   ASSERT_LT(temporary.size() + 1, remote_root.size());
   const auto local_root = temporary + "/" + std::string(remote_root.size() - temporary.size() - 1, 'x');
-  auto table = iceberg::CreateTestTable(local_root, 20, false, {});
-  ASSERT_TRUE(table.ok()) << table.status();
+  ASSERT_NO_THROW(iceberg::CreateTestTable(local_root, 20, false, {}));
   auto transport = std::make_shared<ParquetTransport>();
   size_t rewritten_files = 0;
   // The test writer emits uncompressed Avro metadata. An equal-byte-length
