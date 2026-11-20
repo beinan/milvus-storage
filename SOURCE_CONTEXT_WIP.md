@@ -21,3 +21,11 @@ No commits from #824, #825, or #829 are prerequisites or incorporated here. Lega
 - Live Azure validation of the new Rust path was still running when this snapshot was made. Earlier real Azure table and multi-hour reader runs exercise a separate main C++ implementation and do not qualify this entire branch.
 
 The full changed-file list and unresolved files are recorded in `SOURCE_CONTEXT_WIP.json`.
+
+## LIST HTTP prerequisite follow-up
+
+The additive CXX `resolve_http` method reuses existing native request classification. The source HTTP adapter can opt into directory listing, with separate READ/LIST credential caches and fresh credentials for retry/pagination. Production Iceberg reads keep listing disabled. This is a prerequisite; the Lance provider and reader are still not wired.
+
+The relocatable harness under `cpp/test/source_context_rust_harness` passed 37 tests with 1 intentionally ignored exploratory probe. The corresponding standalone development harness passed the same 37 tests; its live probe is separate. A negative control routing LIST through the READ cache failed as expected. Full Rust check and static library build passed after the CXX update. These tests use injected HTTP/clock/provider and actual native context/OpenDAL.
+
+The first real Azure Rust retained-reader run passed the initial read, one actual expiration, and broker 503/429 recovery, then failed at the next expiry because the shared port-forward exited. The same infrastructure failure ended the separate main C++ soak after 42 successful reads/94 minutes. Neither run establishes completed multi-hour validation. The pod services remained running; supervised forwarding and a separate frozen-binary Rust rerun were started. No expired credential fallback was used. Full multi-hour validation and original-user engine tests remain outstanding.

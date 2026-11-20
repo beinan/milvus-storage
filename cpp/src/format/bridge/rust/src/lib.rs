@@ -136,6 +136,7 @@ pub mod source_context_ffi {
         resource_uri: String,
         scope_root_uri: String,
         root_index: u64,
+        operation: u32,
     }
 
     // Do not derive Debug: this value contains a credential.
@@ -154,6 +155,7 @@ pub mod source_context_ffi {
         fn request_timeout_ms(self: &SourceContextBridge) -> i64;
         fn retain(self: &SourceContextBridge) -> Result<SharedPtr<SourceContextBridge>>;
         fn resolve(self: &SourceContextBridge, resource_uri: &str) -> Result<ResolvedSource>;
+        fn resolve_http(self: &SourceContextBridge, method: &str, uri: &str) -> Result<ResolvedSource>;
         fn fetch(self: &SourceContextBridge, resource_uri: &str, operation: u32) -> Result<SourceCredential>;
     }
 }

@@ -26,7 +26,7 @@ use opendal::{Buffer, Error, ErrorKind, Result};
 use tokio::time::Instant;
 
 use crate::source_lease::SourceLeaseCache;
-use crate::source_read_context::{OwnedSourceContext, SourceFailure};
+use crate::source_read_context::{OwnedSourceContext, SourceFailure, SourceOperation};
 
 fn authorization(error: SourceFailure) -> Error {
     // Credential acquisition already performs its own bounded retries. Do not
@@ -81,6 +81,7 @@ async fn guarded<T>(
 pub(crate) struct SourceHttpClient {
     context: OwnedSourceContext,
     leases: Arc<SourceLeaseCache>,
+    list_leases: Option<SourceLeaseCache>,
     root: String,
     initial_sas_keys: HashSet<String>,
     transport: HttpClient,
@@ -117,10 +118,83 @@ impl SourceHttpClient {
         Ok(Self {
             context,
             leases,
+            list_leases: None,
             root,
             initial_sas_keys,
             transport,
         })
+    }
+
+    /// Listing is opt-in. READ and LIST never share credential cache entries,
+    /// even if a broker happens to issue a SAS containing both permissions.
+    pub(crate) fn with_listing(mut self) -> Result<Self> {
+        self.list_leases = Some(
+            SourceLeaseCache::new(self.context.clone(), &self.root, SourceOperation::List)
+                .map_err(authorization)?,
+        );
+        Ok(self)
+    }
+
+    fn request_leases(&self, request: &http::Request<Buffer>) -> Result<&SourceLeaseCache> {
+        let uri = request.uri().to_string();
+        let unsigned = uri.split('?').next().unwrap();
+        let query = request.uri().query().unwrap_or("");
+        let pairs: Vec<_> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        // Azdls lists at the container URL; the directory is carried in the
+        // query. Validating only the HTTP path would authorize the wrong scope.
+        let listing = pairs.iter().any(|(key, _)| {
+            matches!(
+                key.to_ascii_lowercase().as_str(),
+                "resource"
+                    | "directory"
+                    | "recursive"
+                    | "maxresults"
+                    | "continuation"
+                    | "comp"
+                    | "restype"
+                    | "prefix"
+                    | "marker"
+                    | "delimiter"
+                    | "include"
+            )
+        });
+        let (resolved, leases) = if listing {
+            let leases = self
+                .list_leases
+                .as_ref()
+                .ok_or_else(|| authorization(SourceFailure::Denied))?;
+            // Strip only the SDK's initial SAS fields. Native classification
+            // validates operation parameters (including duplicates), decodes
+            // directory exactly once, and checks the actual requested root.
+            let operation_query = query
+                .split('&')
+                .filter(|pair| {
+                    let key = pair.split('=').next().unwrap_or("");
+                    !self.initial_sas_keys.contains(key)
+                })
+                .collect::<Vec<_>>()
+                .join("&");
+            let resolved = self
+                .context
+                .resolve_http(
+                    request.method().as_str(),
+                    &format!("{unsigned}?{operation_query}"),
+                )
+                .map_err(authorization)?;
+            if resolved.operation != SourceOperation::List as u32 {
+                return Err(authorization(SourceFailure::Denied));
+            }
+            (resolved, leases)
+        } else {
+            (
+                self.context.resolve(unsigned).map_err(authorization)?,
+                self.leases.as_ref(),
+            )
+        };
+        if resolved.scope_root_uri != self.root {
+            return Err(authorization(SourceFailure::Denied));
+        }
+        Ok(leases)
     }
 }
 
@@ -134,18 +208,13 @@ impl HttpFetch for SourceHttpClient {
         }
         let uri = request.uri().to_string();
         let unsigned = uri.split('?').next().unwrap();
-        // Validate the raw path before using a URL parser that could normalize
-        // traversal components. The same context may authorize several roots;
-        // this client's lease still belongs to exactly one of them.
-        let resolved = self.context.resolve(unsigned).map_err(authorization)?;
-        if resolved.scope_root_uri != self.root {
-            return Err(authorization(SourceFailure::Denied));
-        }
+        // Validate scope before URI normalization or credential acquisition.
+        let leases = self.request_leases(&request)?;
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(self.context.request_timeout_ms()))
             .ok_or_else(|| authorization(SourceFailure::InvalidResponse))?;
         let lease = guarded(&self.context, deadline, async {
-            self.leases.acquire().await.map_err(authorization)
+            leases.acquire().await.map_err(authorization)
         })
         .await?;
         let replacement: Vec<_> =

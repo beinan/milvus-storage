@@ -36,6 +36,7 @@ class SourceContextBridge final {
   int64_t request_timeout_ms() const;
   std::shared_ptr<SourceContextBridge> retain() const;
   ResolvedSource resolve(rust::Str resource_uri) const;
+  ResolvedSource resolve_http(rust::Str method, rust::Str uri) const;
   SourceCredential fetch(rust::Str resource_uri, uint32_t operation) const;
 
   private:

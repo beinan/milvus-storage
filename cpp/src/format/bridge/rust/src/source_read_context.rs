@@ -112,6 +112,20 @@ impl OwnedSourceContext {
         Ok(resolved)
     }
 
+    pub(crate) fn resolve_http(
+        &self,
+        method: &str,
+        uri: &str,
+    ) -> Result<ResolvedSource, SourceFailure> {
+        self.check_state()?;
+        let resolved = self
+            .native
+            .resolve_http(method, uri)
+            .map_err(|_| SourceFailure::InvalidResponse)?;
+        SourceFailure::from_status(resolved.status)?;
+        Ok(resolved)
+    }
+
     /// Engine callbacks can perform blocking I/O. Run them on Tokio's blocking
     /// pool, retaining native ownership until completion even if this future is
     /// dropped. The engine callback must still honor its finite request deadline.

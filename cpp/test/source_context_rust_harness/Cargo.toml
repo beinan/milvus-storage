@@ -1,0 +1,31 @@
+[package]
+name = "milvus-source-context-native-tests"
+version = "0.1.0"
+edition = "2024"
+[dependencies]
+cxx = "=1.0.188"
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+chrono = "0.4"
+futures = "0.3"
+iceberg = "=0.9.0"
+iceberg-storage-opendal = { version = "=0.9.0", features = ["opendal-azdls"] }
+lance-core = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
+lance-io = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999", default-features = false, features = ["azure"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+typetag = "0.2"
+url = "2"
+percent-encoding = "2"
+http = "1"
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls", "stream"] }
+opendal = { version = "0.56", features = ["services-azdls"] }
+[build-dependencies]
+cxx-build = "=1.0.188"
+
+[profile.dev]
+debug = 0
