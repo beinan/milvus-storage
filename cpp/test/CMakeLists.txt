@@ -15,6 +15,8 @@ set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall")
 file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
 # This Cargo harness owns its generated CXX header and native test support.
 list(FILTER BUSTUB_TEST_SOURCES EXCLUDE REGEX "/source_context_rust_harness/")
+# This callback is linked into rust-bridge with its generated CXX caller.
+list(REMOVE_ITEM BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/support/source_http_test_support.cpp")
 
 add_executable(milvus_test ${BUSTUB_TEST_SOURCES})
 

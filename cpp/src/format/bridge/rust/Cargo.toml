@@ -10,6 +10,7 @@ crate-type = ["staticlib"]
 [features]
 io-trace = []
 s3-crt-async = []
+source-test-transport = []
 
 [dependencies]
 # common dependencies

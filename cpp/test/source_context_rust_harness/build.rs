@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(feature, values(\"source-test-transport\"))");
     let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest.join("../..").canonicalize().unwrap();
     let root = root.to_str().unwrap();

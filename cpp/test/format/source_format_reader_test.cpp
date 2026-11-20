@@ -17,6 +17,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format.h"
 #include "iceberg_bridge.h"
+#include "source_http_test_support.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
 #include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
@@ -135,12 +136,18 @@ class ParquetTransport final : public Azure::Core::Http::HttpTransport {
     auto range = headers.find("x-ms-range");
     if (range == headers.end())
       range = headers.find("Range");
+    if (range == headers.end())
+      range = headers.find("range");
     const bool partial = range != headers.end();
     if (partial) {
       const auto dash = range->second.find('-');
-      start = std::stoll(range->second.substr(6, dash - 6));
-      if (dash + 1 < range->second.size())
-        end = std::min<int64_t>(end, std::stoll(range->second.substr(dash + 1)));
+      if (dash == 6) {
+        start = std::max<int64_t>(0, contents->size() - std::stoll(range->second.substr(dash + 1)));
+      } else {
+        start = std::stoll(range->second.substr(6, dash - 6));
+        if (dash + 1 < range->second.size())
+          end = std::min<int64_t>(end, std::stoll(range->second.substr(dash + 1)));
+      }
     }
     EXPECT_GE(start, 0);
     EXPECT_LT(end, contents->size());
@@ -155,6 +162,7 @@ class ParquetTransport final : public Azure::Core::Http::HttpTransport {
     response->SetHeader("x-ms-creation-time", "Tue, 01 Jan 2030 00:00:00 GMT");
     response->SetHeader("ETag", "\"test\"");
     response->SetHeader("x-ms-blob-type", "BlockBlob");
+    response->SetHeader("x-ms-resource-type", "file");
     response->SetHeader("x-ms-server-encrypted", "true");
     if (request.GetMethod() == Azure::Core::Http::HttpMethod::Head)
       bodies.emplace_back();
@@ -355,6 +363,7 @@ TEST(SourceFormatReaderTest, NativeLanceReaderRetainsContextAcrossRenewalAndIsol
     (*properties)[PROPERTY_READER_LOGICAL_CHUNK_ROWS] = uint64_t{rows_per_round};
     auto provider = std::make_shared<Provider>();
     auto context = Context(provider);
+    source_context::test::ScopedHttpTransport rust_transport(context->identity(), transport);
     fs::AzureOptions options;
     options.account_name = "acct";
     ASSERT_TRUE(options.ConfigureSourceReadContext(context, transport).ok());
@@ -382,8 +391,8 @@ TEST(SourceFormatReaderTest, NativeLanceReaderRetainsContextAcrossRenewalAndIsol
       ASSERT_TRUE(batch.ok()) << batch.status();
       ASSERT_EQ((*batch)->num_rows(), rows_per_round);
       auto actual = std::static_pointer_cast<arrow::Int64Array>((*batch)->column(0));
-      EXPECT_EQ(actual->Value(0), expected[round * rows_per_round]);
-      EXPECT_EQ(actual->Value(rows_per_round - 1), expected[(round + 1) * rows_per_round - 1]);
+      for (int64_t row = 0; row < rows_per_round; ++row)
+        ASSERT_EQ(actual->Value(row), expected[round * rows_per_round + row]);
     }
     EXPECT_GE(provider->calls.load(), 3);
     provider->now.fetch_add(121000);
@@ -450,6 +459,7 @@ TEST(SourceFormatReaderTest, NativeIcebergPlansFullMetadataTreeAndReadsThroughSo
   ASSERT_GE(rewritten_files, 3);
   auto provider = std::make_shared<Provider>();
   auto context = Context(provider);
+  source_context::test::ScopedHttpTransport rust_transport(context->identity(), transport);
   fs::AzureOptions options;
   options.account_name = "acct";
   ASSERT_TRUE(options.ConfigureSourceReadContext(context, transport).ok());

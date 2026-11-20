@@ -32,6 +32,8 @@ mod source_lance_bridge;
 use source_lance_bridge::*;
 mod source_lease;
 mod source_http;
+#[cfg(feature = "source-test-transport")]
+mod source_test_transport;
 mod source_iceberg_storage;
 mod source_azure_storage;
 mod source_plan_result;

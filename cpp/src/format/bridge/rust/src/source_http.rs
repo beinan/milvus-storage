@@ -94,6 +94,10 @@ impl SourceHttpClient {
         root: &str,
         initial_sas: &str,
     ) -> Result<Self> {
+        #[cfg(feature = "source-test-transport")]
+        if let Some(transport) = crate::source_test_transport::for_context(context.identity()) {
+            return Self::with_transport(context, leases, root, initial_sas, transport);
+        }
         // A redirect would bypass our per-attempt scope check. Azure account
         // endpoints are addressed directly, so do not follow redirects.
         let client = reqwest13::Client::builder()

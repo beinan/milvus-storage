@@ -8,7 +8,7 @@ No commits from #824, #825, or #829 are prerequisites or incorporated here. Lega
 
 - The two Lance merge conflicts are resolved. Source-aware C++ format/table readers and Rust provider/fragment paths are implemented, but full-table qualification is still pending.
 - The source scheduler is currently dataset-local; equivalence with main's tuning and shared scheduling is not claimed.
-- A full native build and end-to-end engine integration have not been completed. Do not select this head as a production dependency.
+- The full native build and all 72 source suites pass after the test transport adaptation described below. End-to-end engine integration remains unqualified; do not select this head as a production dependency.
 - Original-user authorization and full Milvus query tests remain outstanding.
 
 ## Scoped verification completed before this snapshot
@@ -65,3 +65,43 @@ the four-attempt credential batch. Four is not the whole-read budget. Imported
 main C++ table fixtures still require Rust-transport adaptation on 3.0; their
 presence does not establish passing runtime tests. The seven source test C++
 translation units now compile after adapting the release bridge APIs.
+
+
+## Full native build and retained Azure table results
+
+The full native build now succeeds, including `milvus_test`, `Test_FFI` and
+`loon`. The imported Lance/Iceberg metadata tests initially failed because
+their injected C++ transport did not reach the 3.0 Rust HTTP path. A
+`WITH_UT`-only Rust feature forwards the final HTTP request to the native
+fixture registered for that context identity. Actual URI checks, credential
+resolution, signing, Rust format readers and C++ wrappers still run. The two
+previously failing tests pass, and all 72 tests in the seven source suites
+pass in the complete native executable. This does not claim all repository
+tests were run.
+
+The transport is absent from default production builds. A full production
+Rust `cargo check --locked --offline --lib --no-default-features` also passes. Its generated CXX
+bridge and callback implementation belong to the same test-only archive,
+so other native test/tool consumers do not depend on archive link order.
+
+The complete library built from `7550d2a145e51d077c48831cba14a7333475f8d2`
+(SHA-256 `0ce7a0b9f5c9ed7f301452616ced7bf4a3aefc2af1f880cb730649d73df57c16`)
+was copied unchanged into the existing isolated test pod. Three separate
+live Azure runs passed on November 20, 2026: Iceberg, Lance pinned version,
+and Lance latest version. Each retained one native high-level reader, read
+three distinct chunks over approximately 261 seconds, crossed two real
+120-second SAS expirations, and recovered from injected broker 503 then 429.
+All first-column values were checked (1,048,576 rows per Iceberg chunk and
+65,536 per Lance chunk). All processes exited 0.
+
+These runs use the existing fixed-service Catalog and direct cluster
+networking. They do not prove original-user authorization, a complete Milvus
+query, or a fresh multi-hour run of this source-context implementation. Earlier
+local-port-forward attempts failed environmentally before any chunk completed;
+their durations are not combined with these results.
+
+The repository error-handling ratchet is still failing in the existing release
+adaptation: `lance_bridge.cpp` has 27 throw sites against a baseline of 21,
+and `lance_table_reader.cpp` adds four. The test transport adds no production
+throw sites. Do not raise the baseline to accept these; the source-aware
+bridge adaptation needs a separate status-return cleanup before submission.
