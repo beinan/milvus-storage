@@ -22,6 +22,9 @@ typetag = "0.2"
 url = "2"
 percent-encoding = "2"
 http = "1"
+object_store = "0.13"
+object_store_opendal = "0.56"
+snafu = "0.9"
 reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls", "stream"] }
 opendal = { version = "0.56", features = ["services-azdls"] }
 [build-dependencies]

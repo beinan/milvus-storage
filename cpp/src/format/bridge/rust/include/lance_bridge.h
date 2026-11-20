@@ -21,6 +21,8 @@
 #include <stdexcept>
 #include <arrow/c/abi.h>
 #include <arrow/result.h>
+#include <arrow/record_batch.h>
+#include "milvus-storage/source_read_context.h"
 
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
@@ -41,8 +43,17 @@ void ReplaceLanceRuntime(uint32_t num_threads);
 
 class LanceException : public std::runtime_error {
   public:
-  explicit LanceException(const std::string& message) : std::runtime_error(message) {}
+  explicit LanceException(const std::string& message)
+      : std::runtime_error(message), status_(arrow::Status::IOError(message)) {}
+  explicit LanceException(arrow::Status status) : std::runtime_error(status.message()), status_(std::move(status)) {}
+  const arrow::Status& status() const { return status_; }
+
+  private:
+  arrow::Status status_;
 };
+
+arrow::Status SourceLanceBridgeStatus(std::string_view message);
+std::shared_ptr<arrow::RecordBatchReader> WrapSourceLanceBatchReader(std::shared_ptr<arrow::RecordBatchReader> reader);
 
 class BlockingFragmentReader;
 class BlockingScanner;
@@ -95,6 +106,13 @@ class BlockingDataset {
                                                const StorageOptions& storage_options = {},
                                                uint64_t version = 0 /* 0 means latest snapshot */);
 
+  static std::shared_ptr<BlockingDataset> OpenWithContext(const std::string& source_uri,
+                                                          const std::string& lance_uri,
+                                                          const StorageOptions& options,
+                                                          SourceReadContextPtr context,
+                                                          uint64_t version = 0);
+  const SourceReadContextPtr& SourceContext() const { return source_context_; }
+
   static uint64_t ResolveLatestVersion(const std::string& uri, const StorageOptions& storage_options = {});
 
   static std::unique_ptr<BlockingDataset> OpenUnique(const std::string& uri,
@@ -106,7 +124,8 @@ class BlockingDataset {
                                                        LanceDataStorageFormat format = LanceDataStorageFormat::Stable,
                                                        bool enable_stable_row_ids = false);
 
-  explicit BlockingDataset(rust::Box<ffi::BlockingDataset> impl) : impl_(std::move(impl)) {}
+  explicit BlockingDataset(rust::Box<ffi::BlockingDataset> impl, SourceReadContextPtr context = nullptr)
+      : impl_(std::move(impl)), source_context_(std::move(context)) {}
 
   void WriteArrowArrayStream(struct ArrowArrayStream* stream);
 
@@ -150,6 +169,7 @@ class BlockingDataset {
 
   private:
   rust::Box<ffi::BlockingDataset> impl_;
+  SourceReadContextPtr source_context_;
 };
 
 class BlockingFragmentReader {
@@ -159,7 +179,8 @@ class BlockingFragmentReader {
                                                       ArrowSchema& schema,
                                                       const FragmentFilesMetadata* metadata = nullptr);
 
-  explicit BlockingFragmentReader(rust::Box<ffi::BlockingFragmentReader> impl) : impl_(std::move(impl)) {}
+  explicit BlockingFragmentReader(rust::Box<ffi::BlockingFragmentReader> impl, SourceReadContextPtr context = nullptr)
+      : impl_(std::move(impl)), source_context_(std::move(context)) {}
 
   BlockingFragmentReader(BlockingFragmentReader&&) noexcept = default;
   BlockingFragmentReader& operator=(BlockingFragmentReader&&) noexcept = default;
@@ -184,11 +205,13 @@ class BlockingFragmentReader {
 
   private:
   rust::Box<ffi::BlockingFragmentReader> impl_;
+  SourceReadContextPtr source_context_;
 };
 
 class BlockingScanner {
   public:
-  explicit BlockingScanner(rust::Box<ffi::BlockingScanner> impl) : impl_(std::move(impl)) {}
+  explicit BlockingScanner(rust::Box<ffi::BlockingScanner> impl, SourceReadContextPtr context = nullptr)
+      : impl_(std::move(impl)), source_context_(std::move(context)) {}
 
   BlockingScanner(BlockingScanner&&) noexcept = default;
   BlockingScanner& operator=(BlockingScanner&&) noexcept = default;
@@ -202,6 +225,7 @@ class BlockingScanner {
 
   private:
   rust::Box<ffi::BlockingScanner> impl_;
+  SourceReadContextPtr source_context_;
 };
 
 }  // namespace milvus_storage::lance

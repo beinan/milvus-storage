@@ -234,6 +234,7 @@ fn shared_scan_scheduler(
 
 #[derive(Clone)]
 pub struct BlockingDataset {
+    pub(crate) source_context: Option<crate::source_read_context::OwnedSourceContext>,
     pub(crate) inner: Dataset,
     object_store: Arc<lance::io::ObjectStore>,
     // The scheduler is dataset-local by default and domain-shared when explicitly
@@ -244,6 +245,7 @@ pub struct BlockingDataset {
 /// Immutable file footers, deletion state, and stable row IDs for one snapshot's fragment.
 #[derive(Clone)]
 pub struct FragmentFilesMetadata {
+    source_identity: Option<u64>,
     files: Arc<FileMetadataMap>,
     deletion_vector: Option<Arc<DeletionVector>>,
     sorted_deletions: Arc<[u32]>,
@@ -255,7 +257,8 @@ pub struct FragmentFilesMetadata {
 
 impl FragmentFilesMetadata {
     fn for_fragment(&self, dataset: &BlockingDataset, fragment_id: u64) -> Result<Self> {
-        if self.fragment_id != fragment_id
+        if self.source_identity != dataset.source_context.as_ref().map(|c| c.identity())
+            || self.fragment_id != fragment_id
             || self.uri != dataset.inner.uri()
             || self.version != dataset.inner.version().version
         {
@@ -272,10 +275,11 @@ impl FragmentFilesMetadata {
 }
 
 impl BlockingDataset {
-    fn new(inner: Dataset) -> Result<Self> {
+    pub(crate) fn new(inner: Dataset) -> Result<Self> {
         let object_store = TOKIO_RT.block_on(inner.object_store(None))?;
         Ok(Self {
             inner,
+            source_context: None,
             object_store,
             scan_scheduler: Arc::new(OnceLock::new()),
         })
@@ -918,6 +922,7 @@ pub async fn collect_stream_to_batches(
 
 #[derive(Clone)]
 pub struct BlockingFragmentReader {
+    pub(crate) source_context: Option<crate::source_read_context::OwnedSourceContext>,
     pub inner: FragmentReader,
     pub fragment: FileFragment,
     pub projection: ArrowSchema,
@@ -997,6 +1002,7 @@ impl BlockingFragmentReader {
                     files.insert((data_file.base_id, data_file.path.clone()), metadata);
                 }
                 FragmentFilesMetadata {
+                    source_identity: dataset.source_context.as_ref().map(|c| c.identity()),
                     files: Arc::new(files),
                     deletion_vector,
                     sorted_deletions: sorted_deletions.into(),
@@ -1032,6 +1038,7 @@ impl BlockingFragmentReader {
             .await?;
 
         Ok(Self {
+            source_context: dataset.source_context.clone(),
             inner: fragment_reader,
             fragment,
             projection,
@@ -1059,7 +1066,7 @@ impl BlockingFragmentReader {
         physical
     }
 
-    fn map_logical_indices(&self, logical_indices: &[u32]) -> Vec<u32> {
+    pub(crate) fn map_logical_indices(&self, logical_indices: &[u32]) -> Vec<u32> {
         if self.files_metadata.sorted_deletions.is_empty() {
             return logical_indices.to_vec();
         }
@@ -1338,6 +1345,7 @@ impl RecordBatchReader for VecBatchReader {
 }
 
 pub struct BlockingScanner {
+    pub(crate) source_context: Option<crate::source_read_context::OwnedSourceContext>,
     inner: Scanner,
     schema: SchemaRef,
 }
@@ -1389,6 +1397,7 @@ pub unsafe fn create_scanner(
     scanner.batch_size(batch_size as usize);
 
     Ok(Box::new(BlockingScanner {
+        source_context: dataset.source_context.clone(),
         inner: scanner,
         schema: Arc::new(arrow_schema),
     }))

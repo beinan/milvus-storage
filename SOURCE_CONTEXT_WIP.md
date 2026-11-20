@@ -1,13 +1,13 @@
 # WIP: source-authorized readers on 3.0
 
-This branch is an integration checkpoint, not a buildable release or dependency pin. It snapshots an in-progress adaptation of the main source-context work onto the actual PR #817 merge, `f6b5e15e89aa968d1cc1a2d4739211f35a726a22`. It is not an upstream backport submission.
+This branch is an integration checkpoint, not a verified release or production dependency pin. It snapshots an in-progress adaptation of the main source-context work onto the actual PR #817 merge, `f6b5e15e89aa968d1cc1a2d4739211f35a726a22`. It is not an upstream backport submission.
 
 No commits from #824, #825, or #829 are prerequisites or incorporated here. Legacy Azure SAS provider policy remains at the #817 base; held short-lease policy changes are excluded. The new, separately scoped source credential cache has its own renewal policy.
 
 ## Incomplete work
 
-- `cpp/src/format/lance/lance_format.cpp` and `cpp/src/format/lance/lance_table_reader.cpp` intentionally retain merge-conflict markers. The imported main-side source methods still require adaptation to 3.0.
-- The source-aware Lance Rust bridge, filesystem/object-store integration, cache/scheduler isolation, and typed error propagation are not implemented on this branch. Existing source Lance declarations must not be interpreted as working support.
+- The two Lance merge conflicts are resolved. Source-aware C++ format/table readers and Rust provider/fragment paths are implemented, but full-table qualification is still pending.
+- The source scheduler is currently dataset-local; equivalence with main's tuning and shared scheduling is not claimed.
 - A full native build and end-to-end engine integration have not been completed. Do not select this head as a production dependency.
 - Original-user authorization and full Milvus query tests remain outstanding.
 
@@ -35,3 +35,13 @@ The first real Azure Rust retained-reader run passed the initial read, one actua
 After restoring forwarding, the exact frozen binary from the first checkpoint completed a fresh run successfully: 3 reads through the same retained Iceberg FileIO reader, two actual 120-second SAS expirations, and broker statuses `[200, 503, 429, 200, 200]`; elapsed 298.43 seconds, exit 0. Returned bytes matched the fixture each time. This exercised the first checkpoint's production Rust HTTP/read modules and real native context through the existing isolated fixed-service Catalog. It did not exercise the newly added LIST opt-in, a complete Iceberg table, the engine, or original-user OBO. The failed first run remains separate evidence.
 
 The current C++ bridge plus full Rust static library were also relinked and tested after the additive CXX change: all five source status categories, transient retries, context/root/cancellation rejection, and finite unknown-planner detail passed. Supporting legacy native dependencies came from the earlier prototype; a full native build of this WIP branch remains outstanding.
+
+## Source-aware Lance implementation follow-up
+
+The provider retains the native context, validates raw authorities and manifest BasePaths, isolates root/READ/LIST leases, and rejects writes. Dataset/fragment/scan/take paths use source-only finite error envelopes and retain authorization checks on exported streams. Metadata is tied to the context identity; the source scheduler is dataset-local.
+
+A native constructor probe exposed a panic in LanceStore::new: it consults the global Azure provider even when a custom registry is supplied. The constructor now receives the explicitly bound account and its internal prefix is replaced with the retained context identity. The focused provider regression passes without issuing a credential.
+
+Verification: 41 actual native/CXX/OpenDAL harness tests pass (one intentionally ignored exploratory probe), including retained Lance ObjectStore expiry between HEAD/body, escaped keys, cancellation and authority guards. The actual C++ OpenWithContext -> Rust DatasetBuilder -> native issuer probe passes all five source status categories, with retries only for transient failures. This uses supporting legacy native dependencies, not a full native build. Rust test compilation/static library and syntax checks for the three affected C++ files pass. Additional Scan/Take guards compile; full-table/fault tests of these paths remain pending.
+
+The standalone Cargo harness is excluded from the native test glob; the evaluated CMake selection includes 80 normal C++ test files and excludes Cargo-only support code. Native engine build, full Lance dataset reads, original-user authorization, and a fresh complete multi-hour soak remain outstanding. Prior live Rust READ evidence above does not qualify this new Lance implementation.

@@ -27,6 +27,9 @@ mod paimon_testutil;
 mod predicate_parser;
 mod rust_runtime;
 mod source_read_context;
+mod source_lance_store;
+mod source_lance_bridge;
+use source_lance_bridge::*;
 mod source_lease;
 mod source_http;
 mod source_iceberg_storage;
@@ -183,9 +186,29 @@ pub mod lance_ffi {
         memory_size: u64,
     }
 
+    unsafe extern "C++" {
+        include!("source_context_bridge.h");
+        #[namespace = "milvus_storage::source_context::ffi"]
+        #[cxx_name = "SourceContextBridge"]
+        type LanceSourceContextBridge = crate::source_context_ffi::SourceContextBridge;
+    }
+
     extern "Rust" {
 
         type BlockingDataset;
+        fn open_source_dataset(context: SharedPtr<LanceSourceContextBridge>, source_uri: &str, lance_uri: &str, parallelism: u32, version: u64) -> Result<Box<BlockingDataset>>;
+        unsafe fn source_create_scanner(dataset: &BlockingDataset, schema: *mut u8, batch_size: u32) -> Result<Box<BlockingScanner>>;
+        fn source_count_rows(scanner: &BlockingScanner) -> Result<u64>;
+        unsafe fn source_scanner_stream(scanner: &BlockingScanner, output: *mut u8) -> Result<()>;
+        unsafe fn source_dataset_take(dataset: &BlockingDataset, indices: &[u64], schema: *mut u8, output: *mut u8) -> Result<()>;
+        fn source_fragment_rows(dataset: &BlockingDataset, fragment: u64, physical: bool) -> Result<u64>;
+        fn source_fragment_deletions(dataset: &BlockingDataset, fragment: u64) -> Result<Vec<u64>>;
+        unsafe fn source_fragment_schema(dataset: &BlockingDataset, fragment: u64, schema: *mut u8) -> Result<()>;
+        unsafe fn source_open_fragment(dataset: &BlockingDataset, fragment: u64, schema: *mut u8, metadata: *const FragmentFilesMetadata) -> Result<Box<BlockingFragmentReader>>;
+        fn source_fragment_estimates(reader: &BlockingFragmentReader) -> Result<Vec<LanceColumnMemoryEstimate>>;
+        unsafe fn source_take_batch(reader: &BlockingFragmentReader, indices: &[u32], output: *mut u8) -> Result<()>;
+        unsafe fn source_fragment_stream(reader: &BlockingFragmentReader, mode: u32, indices: &[u32], start: u32, end: u32, batch_size: u32, output: *mut u8) -> Result<()>;
+
         /// Test instrumentation for the ObjectStore retained by this dataset.
         ///
         /// When datasets share a ScanScheduler, scheduled reads are tracked by the

@@ -18,6 +18,7 @@
 #include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/source_format_reader.h"
+#include "milvus-storage/filesystem/azure/source_sas_token_policy.h"
 
 #ifdef BUILD_GTEST
 #include "milvus-storage/format/lance/lance_table_writer.h"
@@ -25,53 +26,46 @@
 
 namespace milvus_storage {
 
-<<<<<<< ours
-arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore(const std::string& explore_dir,
-                                                                      const api::Properties& properties) {
-=======
 arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore_with_context(
-    const std::string& explore_dir,
-    const std::shared_ptr<const api::Properties>& properties,
-    SourceReadContextPtr context) {
-  ARROW_ASSIGN_OR_RAISE(auto location, lance::ResolveSourceLanceLocation(explore_dir, properties, context));
-  ARROW_ASSIGN_OR_RAISE(auto snapshot, api::GetValue<int64_t>(properties, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID));
-  ARROW_ASSIGN_OR_RAISE(auto dataset,
-                        lance::BlockingDataset::Open(location.lance_uri, location.source.filesystem, location.options,
-                                                     snapshot <= 0 ? 0 : static_cast<uint64_t>(snapshot)));
-  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
-  ARROW_ASSIGN_OR_RAISE(auto fragments, dataset->GetAllFragmentIds());
-  std::vector<api::ColumnGroupFile> files;
-  for (auto id : fragments) {
-    ARROW_ASSIGN_OR_RAISE(auto rows, dataset->GetFragmentRowCount(id));
-    api::ColumnGroupFile file{lance::MakeLanceUri(location.source.source_uri, id), 0, static_cast<int64_t>(rows), {}};
-    file.Set(lance::kDatasetVersionProperty, dataset->Version());
-    files.emplace_back(std::move(file));
+    const std::string& uri, const std::shared_ptr<const api::Properties>& properties, SourceReadContextPtr context) {
+  ARROW_ASSIGN_OR_RAISE(auto location, lance::ResolveSourceLanceLocation(uri, properties, context));
+  ARROW_ASSIGN_OR_RAISE(auto snapshot, api::GetValue<int64_t>(*properties, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID));
+  try {
+    auto dataset =
+        lance::BlockingDataset::OpenWithContext(location.source.source_uri, location.lance_uri, location.options,
+                                                context, snapshot <= 0 ? 0 : static_cast<uint64_t>(snapshot));
+    std::vector<api::ColumnGroupFile> files;
+    for (auto id : dataset->GetAllFragmentIds()) {
+      api::ColumnGroupFile file{lance::MakeLanceUri(location.source.source_uri, id),
+                                0,
+                                static_cast<int64_t>(dataset->GetFragmentRowCount(id)),
+                                {}};
+      file.Set(lance::kDatasetVersionProperty, dataset->Version());
+      files.emplace_back(std::move(file));
+    }
+    ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+    return files;
+  } catch (const lance::LanceException& e) {
+    return e.status();
   }
-  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
-  return files;
 }
-
 arrow::Result<std::shared_ptr<FormatReader>> LanceFormat::create_reader_with_context(
-    const std::shared_ptr<arrow::Schema>& read_schema,
+    const std::shared_ptr<arrow::Schema>& schema,
     const api::ColumnGroupFile& file,
     const std::shared_ptr<const api::Properties>& properties,
-    const std::vector<std::string>& needed_columns,
+    const std::vector<std::string>& columns,
     const KeyRetriever& key_retriever,
     SourceReadContextPtr context) {
-  // An uncached factory still uses the source metadata loader, so opening a
-  // reader can never re-resolve its dataset through the legacy credentials.
   ARROW_ASSIGN_OR_RAISE(auto metadata, lance::LanceTableReader::MetaTrait::load_metadata_with_context(
                                            file, properties, key_retriever, context));
-  ARROW_ASSIGN_OR_RAISE(auto reader, lance::LanceTableReader::MetaTrait::create_from_metadata(
-                                         metadata, file, read_schema, needed_columns, ""));
+  ARROW_ASSIGN_OR_RAISE(auto reader,
+                        lance::LanceTableReader::MetaTrait::create_from_metadata(metadata, file, schema, columns, ""));
   ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
   return GuardSourceFormatReader(std::move(reader), std::move(context));
 }
 
-arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore(
-    const std::string& explore_dir, const std::shared_ptr<const api::Properties>& properties) {
-  ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, explore_dir));
->>>>>>> theirs
+arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore(const std::string& explore_dir,
+                                                                      const api::Properties& properties) {
   ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, explore_dir.c_str()));
 
   ARROW_ASSIGN_OR_RAISE(auto explore_uri, StorageUri::Parse(explore_dir));

@@ -13,6 +13,8 @@ endif()
 set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall")
 
 file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
+# This Cargo harness owns its generated CXX header and native test support.
+list(FILTER BUSTUB_TEST_SOURCES EXCLUDE REGEX "/source_context_rust_harness/")
 
 add_executable(milvus_test ${BUSTUB_TEST_SOURCES})
 

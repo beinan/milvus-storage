@@ -715,3 +715,159 @@ mod source_listing_tests {
       assert_eq!(h.calls(),3);assert_eq!(h.list_calls(),3);
     }
 }
+
+#[path = "../../../src/format/bridge/rust/src/source_lance_store.rs"]
+mod source_lance_store;
+
+#[cfg(test)]
+mod source_lance_tests {
+    use super::{source_lance_store::*, source_read_context::*, test_ffi};
+    use futures::TryStreamExt;
+    use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutPayload, path::Path};
+    use opendal::{
+        Buffer,
+        raw::{HttpBody, HttpClient, HttpFetch},
+    };
+    use std::sync::{Arc, Mutex};
+    const ROOT: &str = "https://acct.blob.core.windows.net/tables/team/table";
+    const NOW: i64 = 1893456000000;
+    #[derive(Clone, Default)]
+    struct Transport(Arc<Mutex<Vec<(String, String, String)>>>);
+    impl HttpFetch for Transport {
+        async fn fetch(
+            &self,
+            req: http::Request<Buffer>,
+        ) -> opendal::Result<http::Response<HttpBody>> {
+            let q: std::collections::HashMap<_, _> =
+                url::form_urlencoded::parse(req.uri().query().unwrap().as_bytes())
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect();
+            assert_ne!(q["sig"], "source-runtime-unissued");
+            self.0.lock().unwrap().push((
+                req.method().to_string(),
+                req.uri().path().into(),
+                q["sig"].clone(),
+            ));
+            let data = if req.method() == http::Method::HEAD {
+                vec![]
+            } else {
+                vec![Ok(Buffer::from("data"))]
+            };
+            let mut response = http::Response::builder()
+                .status(if req.headers().contains_key("range") {
+                    206
+                } else {
+                    200
+                })
+                .header("content-length", "4")
+                .header("last-modified", "Thu, 19 Nov 2026 00:00:00 GMT")
+                .header("etag", "\"test\"")
+                .header("x-ms-resource-type", "file");
+            if req.headers().contains_key("range") {
+                response = response.header("content-range", "bytes 0-3/4");
+            }
+            Ok(response
+                .body(HttpBody::new(futures::stream::iter(data), None))
+                .unwrap())
+        }
+    }
+    fn store(h: &test_ffi::Harness, t: Transport) -> SourceLanceStore {
+        SourceLanceStore::new(OwnedSourceContext::new(h.context()).unwrap(), ROOT)
+            .unwrap()
+            .with_transport(HttpClient::with(t))
+    }
+    #[tokio::test]
+    async fn provider_constructor_binds_account_and_isolates_context_prefixes() {
+        use lance_io::object_store::{ObjectStoreParams, ObjectStoreProvider};
+        let first = test_ffi::make_harness();
+        let second = test_ffi::make_harness();
+        let mut prefixes = Vec::new();
+        for h in [&first, &second] {
+            let p =
+                SourceLanceProvider::new(OwnedSourceContext::new(h.context()).unwrap(), ROOT, 0)
+                    .unwrap();
+            let u = url::Url::parse("az://tables/team/table").unwrap();
+            let expected = p.calculate_object_store_prefix(&u, None).unwrap();
+            let store = p.new_store(u, &ObjectStoreParams::default()).await.unwrap();
+            assert_eq!(store.store_prefix, expected);
+            prefixes.push(store.store_prefix);
+            assert_eq!(h.calls(), 0);
+        }
+        assert_ne!(prefixes[0], prefixes[1]);
+    }
+    #[tokio::test]
+    async fn retained_object_store_result_refreshes_between_metadata_and_body() {
+        let h = test_ffi::make_harness();
+        let t = Transport::default();
+        let s = store(&h, t.clone());
+        let path = Path::parse("team/table/a%2520%2B%20%C3%A9.lance").unwrap();
+        let result = s.get_opts(&path, GetOptions::default()).await.unwrap();
+        assert_eq!(h.calls(), 1);
+        h.set_time(NOW + 130000);
+        assert_eq!(result.bytes().await.unwrap().as_ref(), b"data");
+        let seen = t.0.lock().unwrap();
+        assert_eq!(
+            seen.iter().map(|x| x.2.as_str()).collect::<Vec<_>>(),
+            vec!["lease1", "lease2"]
+        );
+        assert!(
+            seen.iter()
+                .all(|x| x.1 == "/tables/team/table/a%2520%2B%20%C3%A9.lance"),
+            "{seen:?}"
+        );
+    }
+    #[tokio::test]
+    async fn raw_lance_authorities_traversal_and_mutations_reject_before_issuer() {
+        let h = test_ffi::make_harness();
+        let t = Transport::default();
+        let s = store(&h, t.clone());
+        for uri in [
+            "az://other/team/table/file",
+            "https://other.blob.core.windows.net/tables/team/table/file",
+            "file:///tmp/file",
+            "az://tables/team/table/../private/file",
+            "az://tables/team/table/%2e%2e/private/file",
+            "az://tables/team/table/file?sig=private",
+        ] {
+            assert!(s.resolve_raw_uri(uri).is_err(), "{uri}");
+        }
+        for uri in [
+            "az://tables/team/table/a%2520",
+            "https://acct.dfs.core.windows.net/tables/team/table/a%2520",
+            "abfss://tables@acct.dfs.core.windows.net/team/table/a%2520",
+        ] {
+            assert_eq!(
+                s.resolve_raw_uri(uri).unwrap().as_ref(),
+                "team/table/a%2520"
+            );
+        }
+        let p = Path::parse("team/private/file").unwrap();
+        assert!(s.get(&p).await.is_err());
+        let p = Path::parse("team/table/file").unwrap();
+        assert!(s.put(&p, PutPayload::from_static(b"x")).await.is_err());
+        assert!(s.delete(&p).await.is_err());
+        assert!(s.list(None).try_collect::<Vec<_>>().await.is_err());
+        assert_eq!(h.calls(), 0);
+        assert!(t.0.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn cancellation_reaches_retained_stream_before_more_http() {
+        let h = test_ffi::make_harness();
+        let t = Transport::default();
+        let s = store(&h, t.clone());
+        let result = s
+            .get(&Path::parse("team/table/data").unwrap())
+            .await
+            .unwrap();
+        h.cancel();
+        let error = result.bytes().await.err().unwrap();
+        let e: anyhow::Error = error.into();
+        assert_eq!(
+            e.chain()
+                .find_map(|e| e.downcast_ref::<SourceFailure>())
+                .copied(),
+            Some(SourceFailure::Cancelled)
+        );
+        assert_eq!(t.0.lock().unwrap().len(), 1);
+    }
+}

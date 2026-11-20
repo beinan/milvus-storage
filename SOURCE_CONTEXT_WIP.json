@@ -39,13 +39,18 @@
     "cpp/src/format/bridge/rust/Cargo.lock",
     "cpp/src/format/bridge/rust/Cargo.toml",
     "cpp/src/format/bridge/rust/include/iceberg_bridge.h",
+    "cpp/src/format/bridge/rust/include/lance_bridge.h",
     "cpp/src/format/bridge/rust/include/source_context_bridge.h",
     "cpp/src/format/bridge/rust/src/iceberg_bridge.cpp",
     "cpp/src/format/bridge/rust/src/iceberg_bridgeimpl.rs",
+    "cpp/src/format/bridge/rust/src/lance_bridge.cpp",
+    "cpp/src/format/bridge/rust/src/lance_bridgeimpl.rs",
     "cpp/src/format/bridge/rust/src/lib.rs",
     "cpp/src/format/bridge/rust/src/source_azure_storage.rs",
     "cpp/src/format/bridge/rust/src/source_http.rs",
     "cpp/src/format/bridge/rust/src/source_iceberg_storage.rs",
+    "cpp/src/format/bridge/rust/src/source_lance_bridge.rs",
+    "cpp/src/format/bridge/rust/src/source_lance_store.rs",
     "cpp/src/format/bridge/rust/src/source_lease.rs",
     "cpp/src/format/bridge/rust/src/source_plan_result.rs",
     "cpp/src/format/bridge/rust/src/source_read_context.rs",
@@ -64,6 +69,7 @@
     "cpp/src/reader.cpp",
     "cpp/src/source_read_context.cpp",
     "cpp/src/source_reader.cpp",
+    "cpp/test/CMakeLists.txt",
     "cpp/test/filesystem/source_filesystem_test.cpp",
     "cpp/test/filesystem/source_read_context_c_test.cpp",
     "cpp/test/filesystem/source_read_context_test.cpp",
@@ -81,8 +87,11 @@
     "cpp/test/source_context_rust_harness/test_support.h",
     "cpp/test/source_reader_test.cpp"
   ],
-  "unresolved": [
-    "cpp/src/format/lance/lance_format.cpp",
-    "cpp/src/format/lance/lance_table_reader.cpp"
+  "unresolved": [],
+  "verification_limits": [
+    "Full native build pending",
+    "Full Lance dataset/stream fault tests pending",
+    "Engine and original-user soak pending",
+    "Source scheduler is dataset-local; AIMD tuning not adapted"
   ]
 }

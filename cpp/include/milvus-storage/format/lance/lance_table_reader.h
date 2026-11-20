@@ -68,12 +68,6 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
         const KeyRetriever& key_retriever,
         SourceReadContextPtr context);
 
-    static folly::SemiFuture<arrow::Result<MetadataPtr>> load_metadata_with_context_async(
-        const api::ColumnGroupFile& file,
-        const std::shared_ptr<const api::Properties>& properties,
-        const KeyRetriever& key_retriever,
-        SourceReadContextPtr context);
-
     static arrow::Result<std::shared_ptr<LanceTableReader>> create_from_metadata(
         MetadataPtr metadata,
         const milvus_storage::api::ColumnGroupFile& file,
@@ -113,6 +107,7 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
                    const std::shared_ptr<arrow::Schema>& schema,
                    const std::vector<std::string>& needed_columns = {});
 
+  SourceReadContextPtr source_context_;
   std::shared_ptr<BlockingDataset> dataset_;
   std::string uri_;
   uint64_t fragment_id_;
