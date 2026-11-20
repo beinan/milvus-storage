@@ -20,8 +20,8 @@
 #include <vector>
 
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/source_read_context.h"
 #include "milvus-storage/format/format_reader.h"
-#include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 #include "lance_bridge.h"  // from cpp/src/format/lance/lance-bridge/src/include
 
 namespace milvus_storage::lance {
@@ -50,6 +50,7 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
       // projection-specific and stateful.
       std::shared_ptr<FragmentMetadataCache> fragment_metadata_cache;
       milvus_storage::api::Properties properties;
+      SourceReadContextPtr source_context = nullptr;
     };
 
     using Metadata = FormatReaderMetadata<Payload>;
@@ -60,6 +61,18 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
     static arrow::Result<MetadataPtr> load_metadata(const milvus_storage::api::ColumnGroupFile& file,
                                                     const milvus_storage::api::Properties& properties,
                                                     const KeyRetriever& key_retriever);
+
+    static arrow::Result<MetadataPtr> load_metadata_with_context(
+        const api::ColumnGroupFile& file,
+        const std::shared_ptr<const api::Properties>& properties,
+        const KeyRetriever& key_retriever,
+        SourceReadContextPtr context);
+
+    static folly::SemiFuture<arrow::Result<MetadataPtr>> load_metadata_with_context_async(
+        const api::ColumnGroupFile& file,
+        const std::shared_ptr<const api::Properties>& properties,
+        const KeyRetriever& key_retriever,
+        SourceReadContextPtr context);
 
     static arrow::Result<std::shared_ptr<LanceTableReader>> create_from_metadata(
         MetadataPtr metadata,

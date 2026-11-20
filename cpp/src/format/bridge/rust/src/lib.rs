@@ -26,6 +26,12 @@ mod paimon_split_serde;
 mod paimon_testutil;
 mod predicate_parser;
 mod rust_runtime;
+mod source_read_context;
+mod source_lease;
+mod source_http;
+mod source_iceberg_storage;
+mod source_azure_storage;
+mod source_plan_result;
 mod vortex_bridgeimpl;
 mod vortex_layout_strategy_v2;
 
@@ -71,6 +77,84 @@ static VORTEX_SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
 pub mod rust_runtime_ffi {
     extern "Rust" {
         fn configure_rust_runtime(worker_threads: u32, max_blocking_threads: u32) -> Result<()>;
+    }
+}
+
+// Owned runtime context is passed separately from serializable storage options.
+#[cxx::bridge(namespace = "milvus_storage::source_context::ffi")]
+pub mod source_context_ffi {
+    #[derive(Debug, PartialEq, Eq)]
+    enum SourcePlanFailure {
+        None,
+        Denied,
+        Expired,
+        CredentialTransient,
+        Cancelled,
+        InvalidCredentialResponse,
+        IoUnexpected,
+        IoUnsupported,
+        IoConfigInvalid,
+        IoNotFound,
+        IoPermissionDenied,
+        IoIsADirectory,
+        IoNotADirectory,
+        IoAlreadyExists,
+        IoRateLimited,
+        IoIsSameFile,
+        IoConditionNotMatch,
+        IoRangeNotSatisfied,
+        IoUnknown,
+        OtherPlannerFailure,
+    }
+
+    // Failures contain only safe, typed metadata. Never stringify an upstream
+    // error across CXX: it can contain a signed URL or lose the provider status.
+    struct IcebergSourcePlanResult {
+        files: Vec<SourceIcebergFileInfo>,
+        failure: SourcePlanFailure,
+        io_temporary: bool,
+        io_persistent: bool,
+    }
+
+    struct SourceIcebergFileInfo {
+        data_file_path: String,
+        record_count: u64,
+        num_deleted_rows: u64,
+        delete_metadata_json: Vec<u8>,
+    }
+
+    extern "Rust" {
+        fn iceberg_plan_files_scoped(
+            metadata_location: &str,
+            snapshot_id: i64,
+            context: SharedPtr<SourceContextBridge>,
+        ) -> IcebergSourcePlanResult;
+    }
+
+    struct ResolvedSource {
+        status: u32,
+        resource_uri: String,
+        scope_root_uri: String,
+        root_index: u64,
+    }
+
+    // Do not derive Debug: this value contains a credential.
+    struct SourceCredential {
+        status: u32,
+        sas_token: String,
+        expires_at_unix_ms: i64,
+    }
+
+    unsafe extern "C++" {
+        include!("source_context_bridge.h");
+        type SourceContextBridge;
+        fn identity(self: &SourceContextBridge) -> u64;
+        fn now_unix_ms(self: &SourceContextBridge) -> i64;
+        fn check_state(self: &SourceContextBridge) -> u32;
+        fn request_timeout_ms(self: &SourceContextBridge) -> i64;
+        fn retain(self: &SourceContextBridge) -> Result<SharedPtr<SourceContextBridge>>;
+        fn resolve(self: &SourceContextBridge, resource_uri: &str) -> Result<ResolvedSource>;
+        fn fetch(self: &SourceContextBridge, resource_uri: &str, operation: u32) -> Result<SourceCredential>;
     }
 }
 

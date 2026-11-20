@@ -57,7 +57,7 @@ lance-table = "=7.0.0"
 # add another copy beyond Lance's 0.56 and Iceberg's existing 0.55. `services-oss`
 # is the only service this module uses; this project handles the two-step Aliyun
 # role_arn credential flow before handing static STS creds to opendal.
-opendal = { version = "0.56", features = ["services-oss"] }
+opendal = { version = "0.56", features = ["services-oss", "services-azdls"] }
 object_store_opendal = "0.56"
 
 # Iceberg Ecosystem
@@ -94,6 +94,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # `url::Url` is named in lance-io's ObjectStoreProvider::new_store signature
 # we implement; keep as a direct dep rather than leaning on transitive re-export.
 url = "2"
+percent-encoding = "2"
+http = "1"
+# Match OpenDAL's HTTP client implementation while keeping the legacy clients.
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls", "stream"] }
 
 # Crypto + encoding for Aliyun POP v1 signing in aliyun_oss_provider.rs
 # (ECS IMDS → sts:AssumeRole fallback when OIDC machine identity is absent).

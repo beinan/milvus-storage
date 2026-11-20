@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/format/lance/lance_table_reader.h"
+#include "milvus-storage/filesystem/azure/source_sas_token_policy.h"
 
 #include <algorithm>
 #include <compare>
@@ -436,6 +437,111 @@ static arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::Fragment
     }
     ARROW_ASSIGN_OR_RAISE(file_schema, arrow::ImportSchema(&c_fragment_schema));
   }
+<<<<<<< ours
+=======
+  FOLLY_ARROW_ASSIGN_OR_RAISE(auto physical_rows, dataset->GetFragmentPhysicalRowCount(fragment_id));
+  FOLLY_ARROW_ASSIGN_OR_RAISE(auto logical_chunk_rows,
+                              milvus_storage::api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+  auto metadata = std::make_shared<LanceTableReader::MetaTrait::FragmentMetadata>();
+  metadata->file_schema = std::move(file_schema);
+  metadata->logical_chunk_rows = logical_chunk_rows;
+  // Retain immutable footers and deletion state, without keeping this bootstrap
+  // reader's projection-specific file readers or schema adapters in the cache.
+  ArrowSchema c_schema{};
+  FOLLY_ARROW_RETURN_NOT_OK(arrow::ExportSchema(*metadata->file_schema, &c_schema));
+  ArrowCDataReleaseGuard schema_guard(&c_schema);
+  return submit_lance_async<std::unique_ptr<BlockingFragmentReader>>(
+             "Failed to open Lance fragment metadata",
+             [](uint64_t handle, ArrowArrayStream&) -> arrow::Result<std::unique_ptr<BlockingFragmentReader>> {
+               return BlockingFragmentReader::FromHandle(handle);
+             },
+             [&](LanceAsyncCallback callback, void* context) {
+               return BlockingFragmentReader::OpenAsync(*dataset, fragment_id, c_schema, callback, context);
+             })
+      .deferValue([dataset, fragment_id, physical_rows,
+                   metadata = std::move(metadata)](arrow::Result<std::unique_ptr<BlockingFragmentReader>> opened)
+                      -> folly::SemiFuture<
+                          arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>>> {
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(opened));
+        // RowCount uses the already loaded vector even if the manifest omitted
+        // its deletion count; it performs no additional I/O.
+        FOLLY_ARROW_ASSIGN_OR_RAISE(const auto logical_rows, reader->RowCount());
+        if (physical_rows < logical_rows) {
+          return folly::makeSemiFuture(
+              arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>>(
+                  arrow::Status::Invalid("Fragment ", fragment_id, " has inconsistent metadata: physical_rows (",
+                                         physical_rows, ") < logical_rows (", logical_rows, ")")));
+        }
+        metadata->num_deletions = physical_rows - logical_rows;
+        metadata->file_metadata = reader->GetFilesMetadata();
+        auto estimates = [&]() -> folly::SemiFuture<arrow::Result<std::vector<uint64_t>>> {
+          FIU_RETURN_ON(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL,
+                        folly::makeSemiFuture(arrow::Result<std::vector<uint64_t>>(
+                            arrow::Status::NotImplemented("Injected fault: ", FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL))));
+          return submit_lance_async<std::vector<uint64_t>>(
+              "Failed to estimate Lance column memory",
+              [](uint64_t handle, ArrowArrayStream&) -> arrow::Result<std::vector<uint64_t>> {
+                return BlockingFragmentReader::TakeColumnMemorySizes(handle);
+              },
+              [&](LanceAsyncCallback callback, void* context) {
+                return reader->EstimateFragmentColumnMemoryAsync(callback, context);
+              });
+        }();
+        return std::move(estimates).deferValue(
+            [dataset, fragment_id, logical_rows, metadata = std::move(metadata),
+             reader = std::move(reader)](arrow::Result<std::vector<uint64_t>> result)
+                -> arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata>> {
+              if (result.ok()) {
+                const auto& sizes = *result;
+                if (sizes.size() != static_cast<size_t>(metadata->file_schema->num_fields())) {
+                  result = arrow::Status::Invalid("Lance column memory estimate count does not match the file schema");
+                } else {
+                  uint64_t total = 0;
+                  for (const auto size : sizes) {
+                    if (size > std::numeric_limits<uint64_t>::max() - total) {
+                      result = arrow::Status::Invalid("Lance column memory estimates exceed the uint64_t range");
+                      break;
+                    }
+                    total += size;
+                  }
+                }
+              }
+              // Size estimates are optional, but a source authorization failure
+              // is not an unavailable optimization. Preserve its category even
+              // when the error has round-tripped through the Rust bridge.
+              if (auto detail = ExtendStatusDetail::UnwrapStatus(result.status())) {
+                switch (detail->code()) {
+                  case ExtendStatusCode::SourceAuthDenied:
+                  case ExtendStatusCode::SourceAuthExpired:
+                  case ExtendStatusCode::SourceAuthTransient:
+                  case ExtendStatusCode::SourceAuthCancelled:
+                  case ExtendStatusCode::SourceAuthInvalidResponse:
+                    return result.status();
+                  default:
+                    break;
+                }
+              }
+              const bool memory_size_available = result.ok();
+              std::vector<uint64_t> sizes;
+              if (memory_size_available) {
+                sizes = std::move(result).ValueOrDie();
+              } else {
+                // Optional estimation failure does not discard the reader's retained footers.
+                LOG_STORAGE_DEBUG_ << "Lance column memory estimation is unavailable while loading metadata"
+                                   << ", fragment_id=" << fragment_id << ", status=" << result.status().ToString();
+              }
+              ARROW_ASSIGN_OR_RAISE(
+                  metadata->row_group_infos,
+                  create_row_group_infos(logical_rows, metadata->logical_chunk_rows, sizes, memory_size_available));
+              if (memory_size_available) {
+                metadata->column_memory_weights = std::make_shared<const std::vector<uint64_t>>(std::move(sizes));
+              }
+              std::shared_ptr<const LanceTableReader::MetaTrait::FragmentMetadata> immutable = std::move(metadata);
+              return immutable;
+            });
+      });
+}
+>>>>>>> theirs
 
   // Open once with the complete schema so estimates and later projections share
   // immutable footers, deletion vectors, and stable row IDs.
@@ -566,6 +672,130 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
   return result;
 }
 
+<<<<<<< ours
+=======
+folly::SemiFuture<arrow::Result<LanceTableReader::MetaTrait::MetadataPtr>>
+LanceTableReader::MetaTrait::load_metadata_async(const api::ColumnGroupFile& file,
+                                                 const std::shared_ptr<const api::Properties>& properties,
+                                                 const KeyRetriever& /*key_retriever*/) {
+  return folly::makeSemiFuture().deferValue(
+      [file, properties](folly::Unit) -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto parsed_uri, ParseLanceUri(file.path));
+        auto base_uri = std::move(parsed_uri.first);
+        const auto fragment_id = parsed_uri.second;
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, base_uri));
+        uint64_t version = 0;
+        const auto version_it = file.properties.find(kDatasetVersionProperty);
+        if (version_it != file.properties.end()) {
+          const auto [valid, parsed_version] = api::convert::convertFunc<uint64_t>(version_it->second);
+          if (!valid) {
+            return folly::makeSemiFuture(arrow::Result<MetadataPtr>(arrow::Status::Invalid(
+                "Invalid Lance dataset version for file ", file.path, ": ", version_it->second)));
+          }
+          version = parsed_version;
+        }
+        return open_dataset_async(base_uri, fs, properties, version)
+            .deferValue(
+                [file, properties, base_uri, fs, fragment_id](arrow::Result<std::shared_ptr<BlockingDataset>> result)
+                    -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+                  FOLLY_ARROW_ASSIGN_OR_RAISE(auto dataset, std::move(result));
+                  auto cache = std::make_shared<FragmentMetadataCache>();
+                  return cache
+                      ->get_or_load_async(fragment_id,
+                                          [fragment_id, properties, dataset]() {
+                                            return load_fragment_metadata_async(fragment_id, properties, dataset);
+                                          })
+                      .deferValue([file, properties, base_uri, fs, dataset,
+                                   cache](arrow::Result<std::shared_ptr<const FragmentMetadata>> fragment_result)
+                                      -> arrow::Result<MetadataPtr> {
+                        ARROW_ASSIGN_OR_RAISE(auto fragment, std::move(fragment_result));
+                        auto metadata = std::make_shared<Metadata>();
+                        metadata->cache_key = cache_key(file);
+                        metadata->path = base_uri;
+                        metadata->file_schema = fragment->file_schema;
+                        metadata->cache_size = sizeof(Metadata);
+                        metadata->payload = Payload{base_uri, fs, dataset, cache, properties};
+                        MetadataPtr immutable = std::move(metadata);
+                        return immutable;
+                      });
+                });
+      });
+}
+
+arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTrait::load_metadata_with_context(
+    const api::ColumnGroupFile& file,
+    const std::shared_ptr<const api::Properties>& properties,
+    const KeyRetriever& key_retriever,
+    SourceReadContextPtr context) {
+  return load_metadata_with_context_async(file, properties, key_retriever, std::move(context)).get();
+}
+
+folly::SemiFuture<arrow::Result<LanceTableReader::MetaTrait::MetadataPtr>>
+LanceTableReader::MetaTrait::load_metadata_with_context_async(const api::ColumnGroupFile& file,
+                                                              const std::shared_ptr<const api::Properties>& properties,
+                                                              const KeyRetriever& /*key_retriever*/,
+                                                              SourceReadContextPtr context) {
+  return folly::makeSemiFuture().deferValue([file, properties,
+                                             context](folly::Unit) -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+    FOLLY_ARROW_RETURN_NOT_OK(
+        fs::SourceCredentialArrowStatus(context ? context->CheckState() : LOON_SOURCE_CREDENTIAL_DENIED));
+    FOLLY_ARROW_ASSIGN_OR_RAISE(auto parsed, ParseSourceLanceUri(file.path));
+    FOLLY_ARROW_ASSIGN_OR_RAISE(auto location, ResolveSourceLanceLocation(parsed.first, properties, context));
+    uint64_t version = 0;
+    if (const auto it = file.properties.find(kDatasetVersionProperty); it != file.properties.end()) {
+      const auto [valid, value] = api::convert::convertFunc<uint64_t>(it->second);
+      if (!valid)
+        return folly::makeSemiFuture(
+            arrow::Result<MetadataPtr>(arrow::Status::Invalid("Invalid Lance dataset version")));
+      version = value;
+    }
+    auto resolved = version == 0
+                        ? submit_lance_async<uint64_t>(
+                              "Failed to resolve source Lance dataset version",
+                              [](uint64_t value, ArrowArrayStream&) -> arrow::Result<uint64_t> { return value; },
+                              [&](LanceAsyncCallback callback, void* data) {
+                                return BlockingDataset::ResolveLatestVersionAsync(
+                                    location.lance_uri, location.source.filesystem, location.options, callback, data);
+                              })
+                        : folly::makeSemiFuture(arrow::Result<uint64_t>(version));
+    return std::move(resolved)
+        .deferValue([location, context](arrow::Result<uint64_t> result)
+                        -> folly::SemiFuture<arrow::Result<std::shared_ptr<BlockingDataset>>> {
+          FOLLY_ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+          FOLLY_ARROW_ASSIGN_OR_RAISE(auto version, std::move(result));
+          return get_or_open_dataset_async(location.source.source_uri, location.source.filesystem, location.options,
+                                           location.source.cache_identity, version, location.lance_uri);
+        })
+        .deferValue([file, properties, context, location,
+                     parsed](arrow::Result<std::shared_ptr<BlockingDataset>> result)
+                        -> folly::SemiFuture<arrow::Result<MetadataPtr>> {
+          FOLLY_ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+          FOLLY_ARROW_ASSIGN_OR_RAISE(auto dataset, std::move(result));
+          auto cache = std::make_shared<FragmentMetadataCache>();
+          return cache
+              ->get_or_load_async(parsed.second,
+                                  [id = parsed.second, properties, dataset] {
+                                    return load_fragment_metadata_async(id, properties, dataset);
+                                  })
+              .deferValue(
+                  [file, properties, context, location, parsed, dataset,
+                   cache](arrow::Result<std::shared_ptr<const FragmentMetadata>> result) -> arrow::Result<MetadataPtr> {
+                    ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+                    ARROW_ASSIGN_OR_RAISE(auto fragment, std::move(result));
+                    auto metadata = std::make_shared<Metadata>();
+                    metadata->cache_key = cache_key(file);
+                    metadata->path = parsed.first;
+                    metadata->file_schema = fragment->file_schema;
+                    metadata->cache_size = sizeof(Metadata);
+                    metadata->payload =
+                        Payload{parsed.first, location.source.filesystem, dataset, cache, properties, context};
+                    return MetadataPtr(std::move(metadata));
+                  });
+        });
+  });
+}
+
+>>>>>>> theirs
 arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::create_from_metadata(
     MetadataPtr metadata,
     const milvus_storage::api::ColumnGroupFile& file,
@@ -580,7 +810,8 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
     return arrow::Status::Invalid("Cannot open Lance reader from incomplete metadata");
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto parsed_uri, ParseLanceUri(file.path));
+  ARROW_ASSIGN_OR_RAISE(auto parsed_uri,
+                        (metadata->payload.source_context ? ParseSourceLanceUri(file.path) : ParseLanceUri(file.path)));
   const auto& base_uri = parsed_uri.first;
   const auto fragment_id = parsed_uri.second;
   if (base_uri != metadata->payload.base_uri) {
@@ -618,12 +849,50 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
   ArrowSchema c_arrow_schema;
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*requested_schema, &c_arrow_schema));
 
+<<<<<<< ours
   try {
     reader->fragment_reader_ = BlockingFragmentReader::Open(*metadata->payload.dataset, fragment_id, c_arrow_schema,
                                                             fragment_metadata->files_metadata.get());
   } catch (const LanceException& e) {
     if (c_arrow_schema.release) {
       c_arrow_schema.release(&c_arrow_schema);
+=======
+  return reader;
+}
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<LanceTableReader>>>
+LanceTableReader::MetaTrait::create_from_metadata_async(MetadataPtr metadata,
+                                                        const api::ColumnGroupFile& file,
+                                                        const std::shared_ptr<arrow::Schema>& read_schema,
+                                                        const std::vector<std::string>& needed_columns,
+                                                        const std::string& /*predicate*/) {
+  return folly::makeSemiFuture().deferValue([metadata = std::move(metadata), file, read_schema,
+                                             needed_columns](folly::Unit)
+                                                -> folly::SemiFuture<arrow::Result<std::shared_ptr<LanceTableReader>>> {
+    if (!metadata || !metadata->payload.filesystem || !metadata->payload.dataset ||
+        !metadata->payload.fragment_metadata_cache) {
+      return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(
+          arrow::Status::Invalid("Cannot open Lance reader from incomplete metadata")));
+    }
+    FOLLY_ARROW_ASSIGN_OR_RAISE(auto parsed_uri, (metadata->payload.source_context ? ParseSourceLanceUri(file.path)
+                                                                                   : ParseLanceUri(file.path)));
+    if (parsed_uri.first != metadata->payload.base_uri) {
+      return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(arrow::Status::Invalid(
+          "Lance metadata base URI does not match file URI: ", metadata->payload.base_uri, " != ", parsed_uri.first)));
+    }
+    const auto version_it = file.properties.find(kDatasetVersionProperty);
+    if (version_it != file.properties.end()) {
+      const auto [valid, version] = api::convert::convertFunc<uint64_t>(version_it->second);
+      if (!valid) {
+        return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(
+            arrow::Status::Invalid("Invalid Lance dataset version for file ", file.path, ": ", version_it->second)));
+      }
+      if (version != 0 && version != metadata->payload.dataset->Version()) {
+        return folly::makeSemiFuture(arrow::Result<std::shared_ptr<LanceTableReader>>(
+            arrow::Status::Invalid("Lance dataset version does not match cached metadata for file ", file.path, ": ",
+                                   version, " != ", metadata->payload.dataset->Version())));
+      }
+>>>>>>> theirs
     }
     return arrow::Status::IOError("Failed to open Lance fragment reader for fragment ", fragment_id, ": ", e.what());
   }

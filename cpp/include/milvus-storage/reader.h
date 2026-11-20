@@ -25,6 +25,7 @@
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/thread_pool.h"
+#include "milvus-storage/source_read_context.h"
 
 namespace milvus_storage::api {
 /**
@@ -256,6 +257,15 @@ class Reader {
                                         const std::shared_ptr<arrow::Schema>& schema = nullptr,
                                         const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
                                         const Properties& properties = {});
+
+  // Authenticated source readers retain the immutable context outside Properties.
+  // A null context is an error; this entry point never selects legacy credentials.
+  static arrow::Result<std::unique_ptr<Reader>> create_with_context(
+      const std::shared_ptr<ColumnGroups>& cgs,
+      const std::shared_ptr<arrow::Schema>& schema,
+      const std::shared_ptr<std::vector<std::string>>& needed_columns,
+      const std::shared_ptr<const Properties>& properties,
+      SourceReadContextPtr context);
 
   /**
    * @brief Virtual destructor

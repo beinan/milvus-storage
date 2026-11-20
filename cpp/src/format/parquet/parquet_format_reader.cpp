@@ -48,6 +48,7 @@
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/azure/source_sas_token_policy.h"
 
 namespace milvus_storage::parquet {
 
@@ -174,10 +175,10 @@ static ::parquet::ReaderProperties make_reader_properties(
 
 // Parquet file trailer: [4B footer_length (LE)] [4B magic "PAR1"].
 // Pre-read the parquet footer in a single IO instead of Arrow's default 2-step approach.
-// Returns nullptr on any failure, letting the caller fall back to Arrow's normal path.
-static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_ptr<arrow::io::RandomAccessFile>& file,
-                                                             uint64_t file_size,
-                                                             uint64_t footer_size) {
+// Ordinary optimization failures fall back to Arrow's normal path. Source
+// authorization failures must propagate without silently starting another fetch.
+static arrow::Result<std::shared_ptr<arrow::Buffer>> try_read_footer_buffer(
+    const std::shared_ptr<arrow::io::RandomAccessFile>& file, uint64_t file_size, uint64_t footer_size) {
 #define PARQUET_MAGIC "PAR1"
 #define PARQUET_MAGIC_SIZE 4
 #define PARQUET_FOOTER_TRAILER_SIZE 8  // footer_length(4B) + magic(4B)
@@ -189,16 +190,18 @@ static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_p
   if (auto* async_file = dynamic_cast<milvus_storage::NonBlockingReadAtFile*>(file.get())) {
     auto maybe_buf = arrow::AllocateResizableBuffer(size, file->io_context().pool());
     if (!maybe_buf.ok()) {
-      return nullptr;
+      return std::shared_ptr<arrow::Buffer>{};
     }
     auto buf = std::move(maybe_buf).ValueOrDie();
     auto read_result = async_file->ReadAtAsyncInto(offset, size, buf->mutable_data()).result();
     if (!read_result.ok()) {
-      return nullptr;
+      if (std::dynamic_pointer_cast<fs::SourceCredentialStatusDetail>(read_result.status().detail()))
+        return read_result.status();
+      return std::shared_ptr<arrow::Buffer>{};
     }
     const auto bytes_read = *read_result;
     if (bytes_read < 0 || bytes_read > size || !buf->Resize(bytes_read).ok()) {
-      return nullptr;
+      return std::shared_ptr<arrow::Buffer>{};
     }
     suffix = std::shared_ptr<arrow::Buffer>(std::move(buf));
   } else
@@ -206,12 +209,14 @@ static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_p
   {
     auto suffix_result = file->ReadAt(offset, size);
     if (!suffix_result.ok()) {
-      return nullptr;
+      if (std::dynamic_pointer_cast<fs::SourceCredentialStatusDetail>(suffix_result.status().detail()))
+        return suffix_result.status();
+      return std::shared_ptr<arrow::Buffer>{};
     }
     suffix = *suffix_result;
   }
   if (!suffix || static_cast<uint64_t>(suffix->size()) < PARQUET_FOOTER_TRAILER_SIZE) {
-    return nullptr;
+    return std::shared_ptr<arrow::Buffer>{};
   }
   const uint8_t* data = suffix->data();
 
@@ -222,7 +227,7 @@ static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_p
   // Validate magic bytes and ensure the suffix covers the entire Thrift metadata.
   if (std::memcmp(data + suffix->size() - PARQUET_MAGIC_SIZE, PARQUET_MAGIC, PARQUET_MAGIC_SIZE) != 0 ||
       footer_length + PARQUET_FOOTER_TRAILER_SIZE > static_cast<uint64_t>(suffix->size())) {
-    return nullptr;
+    return std::shared_ptr<arrow::Buffer>{};
   }
 
   return suffix;
@@ -312,7 +317,7 @@ static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parqu
   }
 
   if (!key_retriever && footer_size > 0 && !metadata && file_size > 0 && footer_size <= file_size) {
-    auto footer_buffer = try_read_footer_buffer(parquet_file, file_size, footer_size);
+    ARROW_ASSIGN_OR_RAISE(auto footer_buffer, try_read_footer_buffer(parquet_file, file_size, footer_size));
     metadata = try_parse_footer_metadata(footer_buffer, reader_props);
   }
 
@@ -379,6 +384,20 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
                                                       key_retriever, file.Get<uint64_t>(api::kPropertyFileSize),
                                                       file.Get<uint64_t>(api::kPropertyFooterSize));
   ARROW_RETURN_NOT_OK(reader->open());
+  return create_metadata_from_reader(reader, file);
+}
+
+arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::MetaTrait::load_metadata_with_context(
+    const api::ColumnGroupFile& file,
+    const std::shared_ptr<const api::Properties>& properties,
+    const milvus_storage::KeyRetriever& key_retriever,
+    SourceReadContextPtr context) {
+  ARROW_ASSIGN_OR_RAISE(auto source, FilesystemCache::getInstance().get_with_context(properties, file.path, context));
+  auto reader = std::make_shared<ParquetFormatReader>(
+      source.filesystem, source.path, *properties, std::vector<std::string>{}, key_retriever,
+      file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
+  ARROW_RETURN_NOT_OK(reader->open());
+  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
   return create_metadata_from_reader(reader, file);
 }
 

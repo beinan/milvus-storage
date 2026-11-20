@@ -20,6 +20,9 @@
 #include <vector>
 #include <stdexcept>
 
+#include <arrow/result.h>
+#include "milvus-storage/source_read_context.h"
+
 namespace milvus_storage::iceberg {
 
 class IcebergException : public std::runtime_error {
@@ -45,6 +48,33 @@ struct IcebergFileInfo {
 std::vector<IcebergFileInfo> PlanFiles(const std::string& metadata_location,
                                        int64_t snapshot_id,
                                        const std::unordered_map<std::string, std::string>& storage_options);
+
+// Finite Rust planner category and I/O flags. This detail keeps unclassified
+// failures machine-readable without serializing an upstream signed URL.
+class IcebergSourcePlanErrorDetail final : public arrow::StatusDetail {
+  public:
+  IcebergSourcePlanErrorDetail(uint32_t category, bool temporary, bool persistent)
+      : category_(category), temporary_(temporary), persistent_(persistent) {}
+  const char* type_id() const override { return "milvus_storage::IcebergSourcePlanError"; }
+  std::string ToString() const override {
+    return "category=" + std::to_string(category_) + ", temporary=" + std::to_string(temporary_) +
+           ", persistent=" + std::to_string(persistent_);
+  }
+  uint32_t category() const { return category_; }
+  bool temporary() const { return temporary_; }
+  bool persistent() const { return persistent_; }
+
+  private:
+  uint32_t category_;
+  bool temporary_;
+  bool persistent_;
+};
+
+/// Plan with a retained runtime source context; never use legacy credentials.
+/// Source authorization failures preserve their dedicated Arrow status details.
+arrow::Result<std::vector<IcebergFileInfo>> PlanFilesWithContext(const std::string& metadata_location,
+                                                                 int64_t snapshot_id,
+                                                                 SourceReadContextPtr context);
 
 /// Info returned after creating a test Iceberg table.
 struct IcebergTestTableInfo {

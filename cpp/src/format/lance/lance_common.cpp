@@ -16,13 +16,36 @@
 
 #include <cstdlib>
 #include <fmt/format.h>
+#include <charconv>
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/filesystem/azure/source_sas_token_policy.h"
 
 namespace milvus_storage::lance {
 
 //------------------------------------------------------------------------------
 // Storage Options
 //------------------------------------------------------------------------------
+
+arrow::Result<SourceLanceLocation> ResolveSourceLanceLocation(const std::string& uri,
+                                                              const std::shared_ptr<const api::Properties>& properties,
+                                                              const std::shared_ptr<SourceReadContext>& context) {
+  ARROW_ASSIGN_OR_RAISE(auto source, FilesystemCache::getInstance().get_with_context(properties, uri, context));
+  // Retain the full validated binding alongside Lance's account-less URI.
+  // Do not decode object keys before the Rust object-store boundary.
+  const auto path_offset = source.source_uri.find('/', std::string("https://").size());
+  SourceLanceLocation result;
+  result.lance_uri = "az://" + source.source_uri.substr(path_offset + 1);
+  ArrowFileSystemConfig config;
+  // Only scheduler tuning crosses in serializable options. Credentials and
+  // the source context must use the separately retained runtime binding.
+  result.options["lance_io_parallelism"] = std::to_string(config.lance_io_parallelism);
+  result.options["lance_aimd_initial_rate"] = std::to_string(config.iops_initial_rate);
+  result.options["lance_aimd_max_rate"] = std::to_string(config.iops_max_rate);
+  result.options["milvus_fs_is_local"] = "false";
+  result.options["milvus_fs_cache_key"] = source.cache_identity;
+  result.source = std::move(source);
+  return result;
+}
 
 StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
   StorageOptions options;
@@ -163,6 +186,19 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
 //------------------------------------------------------------------------------
 
 static const std::string kLanceUriDelimiter = "?fragment_id=";
+
+arrow::Result<std::pair<std::string, uint64_t>> ParseSourceLanceUri(const std::string& uri) {
+  const auto pos = uri.find(kLanceUriDelimiter);
+  if (pos == std::string::npos)
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  const auto start = uri.data() + pos + kLanceUriDelimiter.size();
+  const auto end = uri.data() + uri.size();
+  uint64_t fragment = 0;
+  const auto parsed = std::from_chars(start, end, fragment);
+  if (parsed.ec != std::errc{} || parsed.ptr != end)
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  return std::make_pair(uri.substr(0, pos), fragment);
+}
 
 arrow::Result<std::pair<std::string, uint64_t>> ParseLanceUri(const std::string& uri) {
   auto pos = uri.find(kLanceUriDelimiter);

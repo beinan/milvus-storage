@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use crate::TOKIO_RT;
+use crate::source_read_context::OwnedSourceContext;
+use crate::source_iceberg_storage::SourceScopedIcebergFactory;
 
 use arrow_array::Array;
 use futures::TryStreamExt;
@@ -389,6 +391,50 @@ pub fn iceberg_plan_files(
     storage_options_keys: Vec<String>,
     storage_options_values: Vec<String>,
 ) -> Result<Vec<IcebergFileInfo>, anyhow::Error> {
+    plan_files_impl(metadata_location, snapshot_id, storage_options_keys, storage_options_values, None)
+}
+
+// CXX entry point retains native ownership and returns structured failure data.
+// It accepts no static storage options, so failed source authorization cannot
+// fall back to the legacy factory or ambient credentials.
+pub fn iceberg_plan_files_scoped(
+    metadata_location: &str,
+    snapshot_id: i64,
+    context: cxx::SharedPtr<crate::source_context_ffi::SourceContextBridge>,
+) -> crate::source_context_ffi::IcebergSourcePlanResult {
+    crate::source_plan_result::source_plan_result(
+        OwnedSourceContext::new(context)
+            .map_err(anyhow::Error::from)
+            .and_then(|context| iceberg_plan_files_with_context(metadata_location, snapshot_id, context))
+            .map(|files| {
+                files.into_iter().map(|file| crate::source_context_ffi::SourceIcebergFileInfo {
+                    data_file_path: file.data_file_path,
+                    record_count: file.record_count,
+                    num_deleted_rows: file.num_deleted_rows,
+                    delete_metadata_json: file.delete_metadata_json,
+                }).collect()
+            }),
+    )
+}
+
+// Native caller must retain and pass this context separately from properties.
+// This entry point preserves full authorities in its output so downstream
+// context-aware data/delete readers can validate them before URI conversion.
+pub(crate) fn iceberg_plan_files_with_context(
+    metadata_location: &str,
+    snapshot_id: i64,
+    context: OwnedSourceContext,
+) -> Result<Vec<IcebergFileInfo>, anyhow::Error> {
+    plan_files_impl(metadata_location, snapshot_id, Vec::new(), Vec::new(), Some(context))
+}
+
+fn plan_files_impl(
+    metadata_location: &str,
+    snapshot_id: i64,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+    source_context: Option<OwnedSourceContext>,
+) -> Result<Vec<IcebergFileInfo>, anyhow::Error> {
     if metadata_location.is_empty() {
         anyhow::bail!("metadata_location must not be empty");
     }
@@ -396,11 +442,17 @@ pub fn iceberg_plan_files(
     TOKIO_RT.block_on(async {
         let mut props = vec_to_hashmap(storage_options_keys, storage_options_values);
 
-        // Normalize URI for opendal and detect FileIO scheme in one pass.
-        // For Azure ABFSS, expands scheme://container/path to container@endpoint format.
-        let (resolved_location, scheme) = normalize_uri(metadata_location, &props);
-
-        let file_io = build_file_io(&resolved_location, &scheme, &mut props).await?;
+        let (resolved_location, file_io) = if let Some(context) = &source_context {
+            let resolved = context.resolve(metadata_location)?;
+            let factory = Arc::new(SourceScopedIcebergFactory::new(context.clone())?);
+            (resolved.resource_uri, FileIOBuilder::new(factory).build())
+        } else {
+            // Legacy URI normalization and credentials remain independent of
+            // the context-aware path. No scoped failure can enter this branch.
+            let (resolved, scheme) = normalize_uri(metadata_location, &props);
+            let file_io = build_file_io(&resolved, &scheme, &mut props).await?;
+            (resolved, file_io)
+        };
 
         // Load table metadata directly from location (no catalog needed)
         let table_ident = TableIdent::from_strs(["default", "table"])?;
@@ -425,6 +477,14 @@ pub fn iceberg_plan_files(
         for task in &tasks {
             // Build delete metadata JSON
             let delete_refs = build_delete_metadata(task);
+            if let Some(context) = &source_context {
+                // Data references are returned for later C++ reads, while
+                // positional deletes may be read here. Validate both now.
+                context.resolve(&task.data_file_path)?;
+                for reference in &delete_refs {
+                    context.resolve(&reference.path)?;
+                }
+            }
 
             // Reject equality deletes — they must be pre-converted to
             // positional deletes before the manifest is committed.
@@ -452,11 +512,14 @@ pub fn iceberg_plan_files(
             // The delete_refs paths are in opendal format (container@endpoint for Azure).
             let denorm_refs: Vec<DeleteFileRef> = delete_refs
                 .into_iter()
-                .map(|mut r| {
-                    r.path = denormalize_uri(&r.path);
-                    r
+                .map(|mut r| -> Result<_, anyhow::Error> {
+                    r.path = match &source_context {
+                        Some(context) => context.resolve(&r.path)?.resource_uri,
+                        None => denormalize_uri(&r.path),
+                    };
+                    Ok(r)
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
 
             let delete_metadata_json = if denorm_refs.is_empty() {
                 Vec::new() // empty metadata = no deletes
@@ -471,11 +534,17 @@ pub fn iceberg_plan_files(
             // Denormalize data_file_path: strip Azure container@endpoint back to
             // scheme://container/path so C++ sees a uniform format across providers.
             result.push(IcebergFileInfo {
-                data_file_path: denormalize_uri(&task.data_file_path),
+                data_file_path: match &source_context {
+                    Some(context) => context.resolve(&task.data_file_path)?.resource_uri,
+                    None => denormalize_uri(&task.data_file_path),
+                },
                 record_count,
                 num_deleted_rows,
                 delete_metadata_json,
             });
+        }
+        if let Some(context) = &source_context {
+            context.check_state()?;
         }
         Ok(result)
     })
@@ -486,6 +555,20 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn scoped_planner_rejects_missing_context_before_legacy_file_access() {
+        // A valid local metadata file still cannot select the legacy path when
+        // the explicit runtime context is absent.
+        let metadata = tempfile::NamedTempFile::new().unwrap();
+        let result = iceberg_plan_files_scoped(
+            metadata.path().to_str().unwrap(),
+            -1,
+            cxx::SharedPtr::null(),
+        );
+        assert_eq!(result.failure, crate::source_context_ffi::SourcePlanFailure::Denied);
+        assert!(result.files.is_empty());
+    }
     use crate::azure_sas_provider::{
         AZURE_BROKER_ACCOUNT_NAME, AZURE_BROKER_BUCKET, AZURE_BROKER_CLIENT_ID,
         AZURE_BROKER_DURATION_SECONDS, AZURE_BROKER_ENDPOINT, AZURE_BROKER_REGION,

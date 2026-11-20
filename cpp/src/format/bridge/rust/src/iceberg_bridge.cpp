@@ -14,6 +14,8 @@
 
 #include "iceberg_bridge.h"
 #include "bridge_util.h"
+#include "source_context_bridge.h"
+#include "milvus-storage/filesystem/azure/source_sas_token_policy.h"
 
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
@@ -46,6 +48,50 @@ std::vector<IcebergFileInfo> PlanFiles(const std::string& metadata_location,
   } catch (const rust::cxxbridge1::Error& e) {
     throw IcebergException(e.what());
   }
+}
+
+arrow::Result<std::vector<IcebergFileInfo>> PlanFilesWithContext(const std::string& metadata_location,
+                                                                 int64_t snapshot_id,
+                                                                 SourceReadContextPtr context) {
+  if (!context)
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+  auto bridge = std::make_shared<source_context::ffi::SourceContextBridge>(context);
+  auto planned = source_context::ffi::iceberg_plan_files_scoped(
+      rust::Str(metadata_location.data(), metadata_location.size()), snapshot_id, std::move(bridge));
+  // Recheck terminal native state before publishing any planned references.
+  ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
+  using Failure = source_context::ffi::SourcePlanFailure;
+  switch (planned.failure) {
+    case Failure::None:
+      break;
+    case Failure::Denied:
+      return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+    case Failure::Expired:
+      return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_EXPIRED);
+    case Failure::CredentialTransient:
+      return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_TRANSIENT);
+    case Failure::Cancelled:
+      return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_CANCELLED);
+    case Failure::InvalidCredentialResponse:
+      return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_INVALID_RESPONSE);
+    default:
+      // Preserve the finite upstream category/flags without treating unknown
+      // planner failures as bad input or copying a credential-bearing message.
+      // Engine retry classification for these non-authorization errors remains
+      // separate from the source-credential status contract above.
+      return arrow::Status::UnknownError("Iceberg source planning failed")
+          .WithDetail(std::make_shared<IcebergSourcePlanErrorDetail>(static_cast<uint32_t>(planned.failure),
+                                                                     planned.io_temporary, planned.io_persistent));
+  }
+  std::vector<IcebergFileInfo> files;
+  files.reserve(planned.files.size());
+  for (const auto& file : planned.files) {
+    files.push_back({std::string(file.data_file_path.data(), file.data_file_path.size()), file.record_count,
+                     file.num_deleted_rows,
+                     std::vector<uint8_t>(file.delete_metadata_json.begin(), file.delete_metadata_json.end())});
+  }
+  return files;
 }
 
 IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
