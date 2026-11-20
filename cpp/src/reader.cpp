@@ -91,6 +91,24 @@ bool metadata_cache_enabled(const std::shared_ptr<const Properties>& properties)
   return GetValueNoError<bool>(properties, PROPERTY_READER_METADATA_CACHE_ENABLE);
 }
 
+std::shared_ptr<const Properties> internal_reader_properties(const std::shared_ptr<const Properties>& properties) {
+  auto internal = std::make_shared<Properties>(*properties);
+  for (auto it = internal->begin(); it != internal->end();) {
+    if (it->first.compare(0, std::char_traits<char>::length(PROPERTY_EXTFS_PREFIX), PROPERTY_EXTFS_PREFIX) == 0) {
+      it = internal->erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return internal;
+}
+
+struct ColumnGroupReadConfig {
+  MetadataCache metadata_cache;
+  std::shared_ptr<const Properties> properties;
+  std::function<std::string(const std::string&)> key_retriever;
+};
+
 }  // namespace
 
 class PackedRecordBatchReader final : public arrow::RecordBatchReader {
@@ -104,20 +122,18 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
    * @param reader_props The reader properties.
    */
   PackedRecordBatchReader(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
-                          MetadataCache metadata_cache,
+                          std::vector<ColumnGroupReadConfig> read_configs,
                           const std::shared_ptr<arrow::Schema>& schema,
                           const std::vector<std::string>& needed_columns,
                           std::shared_ptr<const Properties> properties,
-                          const std::function<std::string(const std::string&)>& key_retriever,
                           const std::string& predicate = "")
       : column_groups_(column_groups),
-        metadata_cache_(std::move(metadata_cache)),
+        read_configs_(std::move(read_configs)),
         schema_(schema),
         needed_columns_(needed_columns),
         out_field_map_(needed_columns.size()),
         out_schema_(nullptr),
         properties_(std::move(properties)),
-        key_retriever_callback_(key_retriever),
         predicate_(predicate),
         number_of_chunks_per_cg_(column_groups.size()),
         chunk_readers_(column_groups.size()),
@@ -128,6 +144,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         loaded_chunk_indices_(column_groups.size()) {
     assert(needed_columns_.size() > 0);
     assert(column_groups.size() > 0);
+    assert(read_configs_.size() == column_groups_.size());
   }
 
   /**
@@ -151,9 +168,10 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     // Create chunk readers for each column group
     bool already_set_total_rows = false;
     for (size_t i = 0; i < column_groups_.size(); ++i) {
+      const auto& config = read_configs_[i];
       ARROW_ASSIGN_OR_RAISE(chunk_readers_[i],
-                            ColumnGroupReader::create(schema_, column_groups_[i], needed_columns_, properties_,
-                                                      key_retriever_callback_, predicate_, metadata_cache_));
+                            ColumnGroupReader::create(schema_, column_groups_[i], needed_columns_, config.properties,
+                                                      config.key_retriever, predicate_, config.metadata_cache));
       number_of_chunks_per_cg_[i] = chunk_readers_[i]->total_number_of_chunks();
       if (number_of_chunks_per_cg_[i] == 0) {
         return arrow::Status::Invalid(
@@ -506,13 +524,12 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
 
   private:
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
-  MetadataCache metadata_cache_;
+  std::vector<ColumnGroupReadConfig> read_configs_;
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<std::string> needed_columns_;
   std::vector<std::pair<std::int32_t, std::int32_t>> out_field_map_;
   std::shared_ptr<arrow::Schema> out_schema_;
   std::shared_ptr<const Properties> properties_;
-  std::function<std::string(const std::string&)> key_retriever_callback_;
   std::string predicate_;
 
   size_t end_of_offset_;                         // end offset of the data to read
@@ -908,19 +925,29 @@ class ReaderImpl : public Reader {
              const std::shared_ptr<arrow::Schema>& schema,
              const std::shared_ptr<std::vector<std::string>>& needed_columns,
              std::shared_ptr<const Properties> properties,
-             SourceReadContextPtr source_context = nullptr)
+             SourceReadContextPtr source_context = nullptr,
+             const std::vector<size_t>& internal_column_group_indices = {})
       : cgs_(cgs),
         schema_(schema),
         needed_columns_(needed_columns),
         properties_(std::move(properties)),
+        internal_properties_(internal_column_group_indices.empty() ? properties_
+                                                                   : internal_reader_properties(properties_)),
+        source_context_(source_context),
+        internal_column_group_indices_(internal_column_group_indices.begin(), internal_column_group_indices.end()),
         key_retriever_callback_(nullptr),
-        metadata_cache_(metadata_cache_enabled(properties_), std::move(source_context)) {
+        metadata_cache_(metadata_cache_enabled(properties_), std::move(source_context)),
+        internal_metadata_cache_(metadata_cache_enabled(internal_properties_)) {
     // Validate required parameters
     assert(cgs_);
   }
 
   [[nodiscard]] std::shared_ptr<ColumnGroups> get_column_groups() const override {
     assert(cgs_);
+    if (source_context_) {
+      // Do not expose mutable authority-bearing paths after the factory snapshot.
+      return std::make_shared<ColumnGroups>(copy_column_groups(*cgs_));
+    }
     return cgs_;
   }
 
@@ -944,7 +971,11 @@ class ReaderImpl : public Reader {
     // Collect required column groups and share the ReaderImpl-owned metadata cache.
     auto needed_column_group_indices = collect_required_column_group_indices(resolved_columns);
     ARROW_ASSIGN_OR_RAISE(auto needed_column_groups, column_groups_from_indices(needed_column_group_indices));
-    auto metadata_cache = get_metadata_cache();
+    std::vector<ColumnGroupReadConfig> read_configs;
+    read_configs.reserve(needed_column_group_indices.size());
+    for (const auto index : needed_column_group_indices) {
+      read_configs.push_back(get_read_config(index));
+    }
 
     // Build projected schema: from user-provided schema or nullptr
     std::shared_ptr<arrow::Schema> projected_schema = nullptr;
@@ -959,9 +990,8 @@ class ReaderImpl : public Reader {
       projected_schema = arrow::schema(needed_fields);
     }
 
-    auto reader =
-        std::make_shared<PackedRecordBatchReader>(needed_column_groups, std::move(metadata_cache), projected_schema,
-                                                  resolved_columns, properties_, key_retriever_callback_, predicate);
+    auto reader = std::make_shared<PackedRecordBatchReader>(needed_column_groups, std::move(read_configs),
+                                                            projected_schema, resolved_columns, properties_, predicate);
     ARROW_RETURN_NOT_OK(reader->open());
     return reader;
   }
@@ -986,9 +1016,9 @@ class ReaderImpl : public Reader {
     ARROW_ASSIGN_OR_RAISE(auto resolved_columns,
                           resolve_needed_columns(schema_, effective_needed_columns(needed_columns)));
 
-    auto metadata_cache = get_metadata_cache();
-    auto chunk_reader = std::make_unique<ChunkReaderImpl>(schema_, column_group, resolved_columns, properties_,
-                                                          key_retriever_callback_, std::move(metadata_cache));
+    auto config = get_read_config(column_group_index);
+    auto chunk_reader = std::make_unique<ChunkReaderImpl>(schema_, column_group, resolved_columns, config.properties,
+                                                          config.key_retriever, std::move(config.metadata_cache));
     ARROW_RETURN_NOT_OK(chunk_reader->open());
     return chunk_reader;
   }
@@ -1013,9 +1043,9 @@ class ReaderImpl : public Reader {
     FOLLY_ARROW_ASSIGN_OR_RAISE(auto resolved_columns,
                                 resolve_needed_columns(schema_, effective_needed_columns(needed_columns)));
 
-    auto metadata_cache = get_metadata_cache();
-    auto chunk_reader = std::make_unique<ChunkReaderImpl>(schema_, column_group, resolved_columns, properties_,
-                                                          key_retriever_callback_, std::move(metadata_cache));
+    auto config = get_read_config(column_group_index);
+    auto chunk_reader = std::make_unique<ChunkReaderImpl>(schema_, column_group, resolved_columns, config.properties,
+                                                          config.key_retriever, std::move(config.metadata_cache));
     auto* chunk_reader_ptr = chunk_reader.get();
     // The continuation owns the ChunkReaderImpl while open_async() initializes
     // it through the temporary raw pointer.
@@ -1053,8 +1083,7 @@ class ReaderImpl : public Reader {
     ARROW_ASSIGN_OR_RAISE(auto resolved_columns,
                           resolve_needed_columns(schema_, effective_needed_columns(needed_columns)));
     auto needed_column_group_indices = collect_required_column_group_indices(resolved_columns);
-    ARROW_ASSIGN_OR_RAISE(auto needed_column_groups, column_groups_from_indices(needed_column_group_indices));
-    ARROW_ASSIGN_OR_RAISE(auto lazy_readers, create_lazy_readers(needed_column_groups, resolved_columns));
+    ARROW_ASSIGN_OR_RAISE(auto lazy_readers, create_lazy_readers(needed_column_group_indices, resolved_columns));
 
     std::vector<std::shared_ptr<arrow::Table>> tables;
     ARROW_ASSIGN_OR_RAISE(tables, take_tables_sync(row_indices, *lazy_readers, parallelism));
@@ -1088,7 +1117,7 @@ class ReaderImpl : public Reader {
 
     auto needed_column_group_indices = collect_required_column_group_indices(resolved_columns);
     FOLLY_ARROW_ASSIGN_OR_RAISE(auto needed_column_groups, column_groups_from_indices(needed_column_group_indices));
-    FOLLY_ARROW_ASSIGN_OR_RAISE(auto lazy_readers, create_lazy_readers(needed_column_groups, resolved_columns));
+    FOLLY_ARROW_ASSIGN_OR_RAISE(auto lazy_readers, create_lazy_readers(needed_column_group_indices, resolved_columns));
 
     // Fan out file-aware tasks across all required column groups, then combine
     // the reordered per-group tables into the requested logical column order.
@@ -1117,8 +1146,7 @@ class ReaderImpl : public Reader {
       folly::CancellationToken cancellation);
 
   [[nodiscard]] arrow::Result<std::shared_ptr<std::vector<std::unique_ptr<ColumnGroupLazyReader>>>> create_lazy_readers(
-      const std::vector<std::shared_ptr<ColumnGroup>>& needed_column_groups,
-      const std::vector<std::string>& resolved_columns) const;
+      const std::vector<size_t>& needed_column_group_indices, const std::vector<std::string>& resolved_columns) const;
 
   [[nodiscard]] static arrow::Result<std::shared_ptr<arrow::Table>> build_take_table(
       const std::vector<std::shared_ptr<arrow::Table>>& tables,
@@ -1147,10 +1175,14 @@ class ReaderImpl : public Reader {
   std::shared_ptr<arrow::Schema> schema_;                     ///< Logical Arrow schema defining data structure
   std::shared_ptr<std::vector<std::string>> needed_columns_;  ///< Column projection (nullptr = all columns)
   std::shared_ptr<const Properties> properties_;              ///< Configuration properties including encryption
+  std::shared_ptr<const Properties> internal_properties_;
+  SourceReadContextPtr source_context_;
+  const std::unordered_set<size_t> internal_column_group_indices_;
   std::function<std::string(const std::string&)>
       key_retriever_callback_;  ///< Callback function for retrieving encryption keys
   mutable std::mutex metadata_cache_mutex_;
   MetadataCache metadata_cache_;
+  MetadataCache internal_metadata_cache_;
 
   /**
    * @brief Returns the per-call needed_columns if non-null and non-empty, otherwise falls back to the default.
@@ -1296,33 +1328,38 @@ class ReaderImpl : public Reader {
     return column_groups;
   }
 
-  MetadataCache get_metadata_cache() const {
+  ColumnGroupReadConfig get_read_config(size_t column_group_index) const {
     std::lock_guard<std::mutex> lock(metadata_cache_mutex_);
-    return metadata_cache_;
+    if (internal_column_group_indices_.count(column_group_index)) {
+      return {internal_metadata_cache_, internal_properties_, key_retriever_callback_};
+    }
+    return {metadata_cache_, properties_, key_retriever_callback_};
   }
 
   void set_keyretriever(const std::function<std::string(const std::string&)>& callback) override {
     std::lock_guard<std::mutex> lock(metadata_cache_mutex_);
     metadata_cache_ = MetadataCache(metadata_cache_enabled(properties_), metadata_cache_.source_context());
+    internal_metadata_cache_ = MetadataCache(metadata_cache_enabled(internal_properties_));
     key_retriever_callback_ = callback;
   }
 };
 
 arrow::Result<std::shared_ptr<std::vector<std::unique_ptr<ColumnGroupLazyReader>>>> ReaderImpl::create_lazy_readers(
-    const std::vector<std::shared_ptr<ColumnGroup>>& needed_column_groups,
-    const std::vector<std::string>& resolved_columns) const {
+    const std::vector<size_t>& needed_column_group_indices, const std::vector<std::string>& resolved_columns) const {
   // Shared ownership keeps the complete reader set alive across take_async()
   // fan-out and its final continuation.
   auto lazy_readers =
-      std::make_shared<std::vector<std::unique_ptr<ColumnGroupLazyReader>>>(needed_column_groups.size());
-  auto metadata_cache = get_metadata_cache();
-  for (size_t i = 0; i < needed_column_groups.size(); ++i) {
-    if (!needed_column_groups[i]) {
+      std::make_shared<std::vector<std::unique_ptr<ColumnGroupLazyReader>>>(needed_column_group_indices.size());
+  for (size_t i = 0; i < needed_column_group_indices.size(); ++i) {
+    const auto index = needed_column_group_indices[i];
+    const auto& group = (*cgs_)[index];
+    if (!group) {
       return arrow::Status::Invalid(fmt::format("Failed to call take, column group at index {} is empty", i));
     }
+    auto config = get_read_config(index);
     ARROW_ASSIGN_OR_RAISE((*lazy_readers)[i],
-                          ColumnGroupLazyReader::create(schema_, needed_column_groups[i], properties_, resolved_columns,
-                                                        key_retriever_callback_, metadata_cache));
+                          ColumnGroupLazyReader::create(schema_, group, config.properties, resolved_columns,
+                                                        config.key_retriever, std::move(config.metadata_cache)));
   }
   return lazy_readers;
 }
@@ -1514,10 +1551,35 @@ arrow::Result<std::unique_ptr<Reader>> Reader::create_with_context(
     const std::shared_ptr<std::vector<std::string>>& needed_columns,
     const std::shared_ptr<const Properties>& properties,
     SourceReadContextPtr context) {
+  return create_with_context(cgs, schema, needed_columns, properties, std::move(context), {});
+}
+
+arrow::Result<std::unique_ptr<Reader>> Reader::create_with_context(
+    const std::shared_ptr<ColumnGroups>& cgs,
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<std::vector<std::string>>& needed_columns,
+    const std::shared_ptr<const Properties>& properties,
+    SourceReadContextPtr context,
+    const std::vector<size_t>& internal_column_group_indices) {
   if (!cgs || !properties)
     return arrow::Status::Invalid("Missing source reader configuration");
   ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context ? context->CheckState() : LOON_SOURCE_CREDENTIAL_DENIED));
-  return GuardSourceReader(std::make_unique<ReaderImpl>(cgs, schema, needed_columns, properties, context), context);
+  for (const auto& group : *cgs) {
+    if (!group)
+      return arrow::Status::Invalid("Missing source reader column group");
+  }
+  std::unordered_set<size_t> selected;
+  for (const auto index : internal_column_group_indices) {
+    if (index >= cgs->size() || !selected.insert(index).second)
+      return arrow::Status::Invalid("Invalid internal column group selection");
+  }
+  auto owned_groups = std::make_shared<ColumnGroups>(copy_column_groups(*cgs));
+  auto owned_columns = needed_columns ? std::make_shared<std::vector<std::string>>(*needed_columns) : nullptr;
+  auto owned_properties = std::make_shared<const Properties>(*properties);
+  return GuardSourceReader(
+      std::make_unique<ReaderImpl>(owned_groups, schema, owned_columns, std::move(owned_properties), context,
+                                   internal_column_group_indices),
+      context);
 }
 
 }  // namespace milvus_storage::api

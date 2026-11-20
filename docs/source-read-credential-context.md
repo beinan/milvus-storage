@@ -55,3 +55,25 @@ Direct latest-version discovery from the development host initially failed at DF
 This main-based branch is a consumable native integration checkpoint for the engine adapter, not production qualification. The external source C ABI is stable for that integration. The upstream PR remains Draft until the original-user Catalog/Milvus authorization and retry path is validated on live Azure. Complete-Iceberg planning and adversarial Lance URI validation now have native coverage as described above; generated adversarial Lance index and deletion-file references remain additional qualification gaps; embedded data BasePaths are covered as described above. Engine recovery must reconstruct runtime authority; neither serialized options nor a cache key authorizes a read. No OBO grant or deployment change is included here.
 
 The 79 native integration cases use actual main Rust/C++ code and Azure SDK clients with injected transports and clocks. Standalone Rust unit tests added for source identity parsing and serialization have not been executed separately. OOM/unexpected-exception translation is implemented but not fault-injected. The ordinary shared-library exports were checked; the Python/hidden-symbol build has not been separately qualified. These limits are retained so downstream integration does not mistake a native checkpoint for end-to-end approval.
+
+
+## Mixed external and engine-owned column groups
+
+A segment may contain source columns and generated internal columns. The optional
+sixth argument to `Reader::create_with_context` is a vector of original column
+group indices that the trusted caller has independently verified as engine-owned.
+The five-argument overload remains strictly source-only. Callers must never derive
+this selection from a source authorization error or untrusted manifest paths.
+
+The mixed reader snapshots the groups, projection, properties and index selection.
+Returned group metadata is copied. Selected groups use independent internal
+reader caches and the default filesystem configuration with `extfs.*` overrides
+removed; other groups retain the source context. Sync/async takes, chunk readers
+and record-batch streams preserve the original group indices. Cache reset and
+context cancellation/deadline guards apply to both kinds of reads. Source denials
+never fall back to internal credentials.
+
+`SourceContextMixedData.*` uses local Parquet files and a denying source provider
+to cover generated reads, immutable metadata/property snapshots, cache resets,
+source denials, cancellation, and invalid index selections without cloud secrets.
+These tests complement the engine's ownership, sampling and index-projection tests.

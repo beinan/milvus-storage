@@ -276,6 +276,19 @@ class Reader {
       const std::shared_ptr<const Properties>& properties,
       SourceReadContextPtr context);
 
+  // Mixed manifests may contain groups owned by the engine alongside external
+  // source groups. The caller must validate ownership before selecting original
+  // group indices here. Selection never follows a source authorization failure.
+  // Groups, projection and properties are snapshotted. An empty selection keeps
+  // the strict source-only behavior of the five-argument overload.
+  static arrow::Result<std::unique_ptr<Reader>> create_with_context(
+      const std::shared_ptr<ColumnGroups>& cgs,
+      const std::shared_ptr<arrow::Schema>& schema,
+      const std::shared_ptr<std::vector<std::string>>& needed_columns,
+      const std::shared_ptr<const Properties>& properties,
+      SourceReadContextPtr context,
+      const std::vector<size_t>& internal_column_group_indices);
+
   /**
    * @brief Virtual destructor
    *
