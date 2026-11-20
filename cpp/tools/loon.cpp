@@ -377,7 +377,7 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(const std::strin
   auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
 
   auto dataset = milvus_storage::lance::BlockingDataset::Open(lance_base_uri, storage_options);
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  ARROW_ASSIGN_OR_RAISE(auto fragment_ids, dataset->GetAllFragmentIds());
 
   std::vector<ColumnGroupFile> files;
   for (auto frag_id : fragment_ids) {

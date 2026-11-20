@@ -106,11 +106,11 @@ class BlockingDataset {
                                                const StorageOptions& storage_options = {},
                                                uint64_t version = 0 /* 0 means latest snapshot */);
 
-  static std::shared_ptr<BlockingDataset> OpenWithContext(const std::string& source_uri,
-                                                          const std::string& lance_uri,
-                                                          const StorageOptions& options,
-                                                          SourceReadContextPtr context,
-                                                          uint64_t version = 0);
+  static arrow::Result<std::shared_ptr<BlockingDataset>> OpenWithContext(const std::string& source_uri,
+                                                                         const std::string& lance_uri,
+                                                                         const StorageOptions& options,
+                                                                         SourceReadContextPtr context,
+                                                                         uint64_t version = 0);
   const SourceReadContextPtr& SourceContext() const { return source_context_; }
 
   static uint64_t ResolveLatestVersion(const std::string& uri, const StorageOptions& storage_options = {});
@@ -127,7 +127,7 @@ class BlockingDataset {
   explicit BlockingDataset(rust::Box<ffi::BlockingDataset> impl, SourceReadContextPtr context = nullptr)
       : impl_(std::move(impl)), source_context_(std::move(context)) {}
 
-  void WriteArrowArrayStream(struct ArrowArrayStream* stream);
+  arrow::Status WriteArrowArrayStream(struct ArrowArrayStream* stream);
 
   BlockingDataset(BlockingDataset&&) noexcept = default;
   BlockingDataset& operator=(BlockingDataset&&) noexcept = default;
@@ -135,11 +135,11 @@ class BlockingDataset {
   BlockingDataset(const BlockingDataset&) = delete;
   BlockingDataset& operator=(const BlockingDataset&) = delete;
 
-  void DeleteRows(const std::string& predicate);
+  arrow::Status DeleteRows(const std::string& predicate);
 
-  [[nodiscard]] uint64_t Version() const;
+  arrow::Result<uint64_t> Version() const;
 
-  std::vector<uint64_t> GetAllFragmentIds() const;
+  arrow::Result<std::vector<uint64_t>> GetAllFragmentIds() const;
 
   std::vector<uint64_t> GetFragmentDeletionPositions(uint64_t fragment_id) const;
 
@@ -188,10 +188,10 @@ class BlockingFragmentReader {
   BlockingFragmentReader(const BlockingFragmentReader&) = delete;
   BlockingFragmentReader& operator=(const BlockingFragmentReader&) = delete;
 
-  uint64_t RowCount() const;
+  arrow::Result<uint64_t> RowCount() const;
 
   // Reuse retained footers, deletion state and row IDs across projections.
-  std::shared_ptr<const FragmentFilesMetadata> GetFilesMetadata() const;
+  arrow::Result<std::shared_ptr<const FragmentFilesMetadata>> GetFilesMetadata() const;
   arrow::Result<std::vector<uint64_t>> EstimateFragmentColumnMemory() const;
   arrow::Result<uint64_t> EstimateFragmentMemory() const;
 

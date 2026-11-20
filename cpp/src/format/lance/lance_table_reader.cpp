@@ -138,8 +138,12 @@ class LanceDatasetCache final {
     auto status = arrow::Status::OK();
     DatasetPtr dataset;
     try {
-      dataset = load_fn();
-      if (!dataset) {
+      arrow::Result<DatasetPtr> loaded = load_fn();
+      status = loaded.status();
+      if (loaded.ok()) {
+        dataset = std::move(loaded).ValueOrDie();
+      }
+      if (status.ok() && !dataset) {
         status = arrow::Status::Invalid("Lance dataset loader returned null for base URI: ", key.base_uri,
                                         ", version: ", key.version);
       }
@@ -457,7 +461,7 @@ static arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::Fragment
   uint64_t physical_rows = 0;
   try {
     fragment_reader = BlockingFragmentReader::Open(*dataset, fragment_id, c_read_schema);
-    logical_rows = fragment_reader->RowCount();
+    ARROW_ASSIGN_OR_RAISE(logical_rows, fragment_reader->RowCount());
     physical_rows = dataset->GetFragmentPhysicalRowCount(fragment_id);
   } catch (const LanceException& e) {
     if (c_read_schema.release) {
@@ -494,7 +498,7 @@ static arrow::Result<std::shared_ptr<const LanceTableReader::MetaTrait::Fragment
       create_row_group_infos(logical_rows, logical_chunk_rows, fragment_column_memory_sizes, memory_size_available));
 
   auto fragment_metadata = std::make_shared<LanceTableReader::MetaTrait::FragmentMetadata>();
-  fragment_metadata->files_metadata = fragment_reader->GetFilesMetadata();
+  ARROW_ASSIGN_OR_RAISE(fragment_metadata->files_metadata, fragment_reader->GetFilesMetadata());
   fragment_metadata->file_schema = std::move(file_schema);
   fragment_metadata->row_group_infos = std::move(row_group_infos);
   fragment_metadata->num_deletions = physical_rows - logical_rows;
@@ -598,22 +602,21 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
   }
   std::shared_ptr<BlockingDataset> resolved;
   if (version == 0) {
-    try {
-      resolved =
-          BlockingDataset::OpenWithContext(location.source.source_uri, location.lance_uri, location.options, context);
-      version = resolved->Version();
-    } catch (const LanceException& e) {
-      return e.status();
-    }
+    ARROW_ASSIGN_OR_RAISE(resolved, BlockingDataset::OpenWithContext(location.source.source_uri, location.lance_uri,
+                                                                     location.options, context));
+    ARROW_ASSIGN_OR_RAISE(version, resolved->Version());
   }
   const LanceDatasetCache::Key key{.version = version,
                                    .base_uri = location.source.source_uri,
                                    .filesystem_cache_key = location.source.cache_identity};
-  ARROW_ASSIGN_OR_RAISE(auto dataset, LanceDatasetCache::Instance().GetOrOpen(key, [&]() {
-    return resolved ? resolved
-                    : BlockingDataset::OpenWithContext(location.source.source_uri, location.lance_uri, location.options,
-                                                       context, version);
-  }));
+  ARROW_ASSIGN_OR_RAISE(
+      auto dataset,
+      LanceDatasetCache::Instance().GetOrOpen(key, [&]() -> arrow::Result<std::shared_ptr<BlockingDataset>> {
+        if (resolved)
+          return resolved;
+        return BlockingDataset::OpenWithContext(location.source.source_uri, location.lance_uri, location.options,
+                                                context, version);
+      }));
   ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
   auto cache = std::make_shared<FragmentMetadataCache>();
   ARROW_ASSIGN_OR_RAISE(auto fragment, cache->get_or_load(parsed.second, [&]() {
@@ -659,9 +662,10 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
     if (!valid) {
       return arrow::Status::Invalid("Invalid Lance dataset version for file ", file.path, ": ", version_it->second);
     }
-    if (version != 0 && version != metadata->payload.dataset->Version()) {
+    ARROW_ASSIGN_OR_RAISE(auto cached_version, metadata->payload.dataset->Version());
+    if (version != 0 && version != cached_version) {
       return arrow::Status::Invalid("Lance dataset version does not match cached metadata for file ", file.path, ": ",
-                                    version, " != ", metadata->payload.dataset->Version());
+                                    version, " != ", cached_version);
     }
   }
 
@@ -759,7 +763,7 @@ arrow::Status LanceTableReader::open() {
   // However, read_range's batch_size is applied to the *physical* range after
   // patch_range_for_deletions, so we add num_deletions_ to batch_size to ensure
   // each read produces a single output batch.
-  auto logical_rows = fragment_reader_->RowCount();
+  ARROW_ASSIGN_OR_RAISE(auto logical_rows, fragment_reader_->RowCount());
   try {
     auto physical_rows = dataset_->GetFragmentPhysicalRowCount(fragment_id_);
     if (physical_rows < logical_rows) {
@@ -828,9 +832,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> LanceTableReader::get_chunk(c
   assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
   return arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0));
 } catch (const LanceException& e) {
-  if (source_context_)
-    return e.status();
-  throw;
+  return e.status();
 }
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> LanceTableReader::get_chunks(
@@ -882,9 +884,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> LanceTableReader
 
   return rbs;
 } catch (const LanceException& e) {
-  if (source_context_)
-    return e.status();
-  throw;
+  return e.status();
 }
 
 arrow::Result<std::shared_ptr<arrow::Table>> LanceTableReader::take(const std::vector<int64_t>& row_indices) try {
@@ -894,7 +894,8 @@ arrow::Result<std::shared_ptr<arrow::Table>> LanceTableReader::take(const std::v
 
   // out of range
   if (chunkedarray->num_chunks() == 0) {
-    return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", fragment_reader_->RowCount()));
+    ARROW_ASSIGN_OR_RAISE(auto row_count, fragment_reader_->RowCount());
+    return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", row_count));
   }
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
@@ -905,9 +906,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> LanceTableReader::take(const std::v
 
   return arrow::Table::FromRecordBatches(rbs);
 } catch (const LanceException& e) {
-  if (source_context_)
-    return e.status();
-  throw;
+  return e.status();
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> LanceTableReader::read_with_range(
@@ -920,9 +919,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> LanceTableReader::read_
   ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ImportRecordBatchReader(&array_stream));
   return source_context_ ? WrapSourceLanceBatchReader(std::move(reader)) : reader;
 } catch (const LanceException& e) {
-  if (source_context_)
-    return e.status();
-  throw;
+  return e.status();
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> LanceTableReader::clone_reader() {

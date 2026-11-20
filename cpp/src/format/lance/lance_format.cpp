@@ -31,16 +31,18 @@ arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore_with_conte
   ARROW_ASSIGN_OR_RAISE(auto location, lance::ResolveSourceLanceLocation(uri, properties, context));
   ARROW_ASSIGN_OR_RAISE(auto snapshot, api::GetValue<int64_t>(*properties, PROPERTY_READER_EXTTABLE_SNAPSHOT_ID));
   try {
-    auto dataset =
-        lance::BlockingDataset::OpenWithContext(location.source.source_uri, location.lance_uri, location.options,
-                                                context, snapshot <= 0 ? 0 : static_cast<uint64_t>(snapshot));
+    ARROW_ASSIGN_OR_RAISE(auto dataset, lance::BlockingDataset::OpenWithContext(
+                                            location.source.source_uri, location.lance_uri, location.options, context,
+                                            snapshot <= 0 ? 0 : static_cast<uint64_t>(snapshot)));
+    ARROW_ASSIGN_OR_RAISE(auto fragment_ids, dataset->GetAllFragmentIds());
+    ARROW_ASSIGN_OR_RAISE(auto dataset_version, dataset->Version());
     std::vector<api::ColumnGroupFile> files;
-    for (auto id : dataset->GetAllFragmentIds()) {
+    for (auto id : fragment_ids) {
       api::ColumnGroupFile file{lance::MakeLanceUri(location.source.source_uri, id),
                                 0,
                                 static_cast<int64_t>(dataset->GetFragmentRowCount(id)),
                                 {}};
-      file.Set(lance::kDatasetVersionProperty, dataset->Version());
+      file.Set(lance::kDatasetVersionProperty, dataset_version);
       files.emplace_back(std::move(file));
     }
     ARROW_RETURN_NOT_OK(fs::SourceCredentialArrowStatus(context->CheckState()));
@@ -78,8 +80,8 @@ arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore(const std:
   // the requested snapshot (latest for -1/0) and must not reuse an earlier
   // discovery. The actual version is persisted below for exact-version reads.
   auto dataset = lance::BlockingDataset::Open(lance_base_uri, storage_options, requested_version);
-  auto fragment_ids = dataset->GetAllFragmentIds();
-  const auto dataset_version = dataset->Version();
+  ARROW_ASSIGN_OR_RAISE(auto fragment_ids, dataset->GetAllFragmentIds());
+  ARROW_ASSIGN_OR_RAISE(auto dataset_version, dataset->Version());
 
   std::vector<api::ColumnGroupFile> files;
   for (auto frag_id : fragment_ids) {

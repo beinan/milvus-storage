@@ -25,6 +25,7 @@
     "cpp/include/milvus-storage/reader.h",
     "cpp/include/milvus-storage/source_read_context.h",
     "cpp/include/milvus-storage/source_reader.h",
+    "cpp/scripts/error_handling_baseline.tsv",
     "cpp/src/common/extend_status.cpp",
     "cpp/src/ffi/reader_c.cpp",
     "cpp/src/ffi/result_c.cpp",
@@ -65,6 +66,7 @@
     "cpp/src/format/lance/lance_common.cpp",
     "cpp/src/format/lance/lance_format.cpp",
     "cpp/src/format/lance/lance_table_reader.cpp",
+    "cpp/src/format/lance/lance_table_writer.cpp",
     "cpp/src/format/parquet/parquet_format.cpp",
     "cpp/src/format/parquet/parquet_format_reader.cpp",
     "cpp/src/format/source_format_reader.cpp",
@@ -77,6 +79,8 @@
     "cpp/test/filesystem/source_read_context_test.cpp",
     "cpp/test/filesystem/source_read_scope_test.cpp",
     "cpp/test/filesystem/source_sas_token_policy_test.cpp",
+    "cpp/test/format/external_table_test.cpp",
+    "cpp/test/format/lance/lance_table_test.cpp",
     "cpp/test/format/source_format_reader_test.cpp",
     "cpp/test/include/source_http_test_support.h",
     "cpp/test/source_context_rust_harness/Cargo.lock",
@@ -90,7 +94,8 @@
     "cpp/test/source_context_rust_harness/test_support.cpp",
     "cpp/test/source_context_rust_harness/test_support.h",
     "cpp/test/source_reader_test.cpp",
-    "cpp/test/support/source_http_test_support.cpp"
+    "cpp/test/support/source_http_test_support.cpp",
+    "cpp/tools/loon.cpp"
   ],
   "unresolved": [],
   "verification_limits": [
@@ -98,6 +103,6 @@
     "Source scheduler is dataset-local; AIMD tuning not adapted",
     "Lance outer retries can repeat credential batches; observed16provider calls for one failed file read",
     "Live native table runs cover two expiries with fixed-service Catalog; no fresh multi-hour or full-engine original-user qualification",
-    "Error-handling ratchet fails in existing release Lance adaptation: bridge27 vs baseline21; table reader4 vs0"
+    "Native status-return follow-up: 73 source +27 local Lance tests pass; 2 cloud-only tests skipped; no new live Azure or full-engine/multi-hour qualification"
   ]
 }

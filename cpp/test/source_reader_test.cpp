@@ -225,15 +225,21 @@ TEST_F(SourceReaderTest, LanceRustAdapterValidatesCompleteUrisBeforeCredentialAc
     auto location = lance::ResolveSourceLanceLocation(kRoot, Properties(), context);
     ASSERT_TRUE(location.ok()) << location.status();
     provider->calls = 0;
-    try {
-      lance::BlockingDataset::OpenWithContext(kRoot, uri, location->options, context, 1);
-      FAIL() << "Invalid source URI was accepted";
-    } catch (const lance::LanceException& error) {
-      ExpectSource(error.status(), LOON_SOURCE_AUTH_DENIED);
-      EXPECT_EQ(error.status().ToString().find("hidden"), std::string::npos);
-    }
+    auto result = lance::BlockingDataset::OpenWithContext(kRoot, uri, location->options, context, 1);
+    ExpectSource(result.status(), LOON_SOURCE_AUTH_DENIED);
+    EXPECT_EQ(result.status().ToString().find("hidden"), std::string::npos);
     EXPECT_EQ(provider->calls, 0);
   }
+}
+
+TEST_F(SourceReaderTest, LanceBridgeRejectsMissingOrCancelledContextBeforeOpening) {
+  auto missing = lance::BlockingDataset::OpenWithContext(kRoot, "az://tables/team/table", {}, nullptr);
+  ExpectSource(missing.status(), LOON_SOURCE_AUTH_DENIED);
+  auto context = Context();
+  context->Cancel();
+  auto cancelled = lance::BlockingDataset::OpenWithContext(kRoot, "az://tables/team/table", {}, context);
+  ExpectSource(cancelled.status(), LOON_SOURCE_AUTH_CANCELLED);
+  EXPECT_EQ(provider->calls, 0);
 }
 
 TEST_F(SourceReaderTest, IcebergPlannerPreservesEveryProviderFailureThroughRustAndCxx) {

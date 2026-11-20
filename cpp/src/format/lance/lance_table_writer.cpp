@@ -118,7 +118,13 @@ std::vector<uint64_t> fids_diff(const std::vector<uint64_t>& origin, const std::
 
 arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   assert(!closed_);
-  struct ArrowArrayStream array_stream;
+  struct ArrowArrayStream array_stream {};
+  const auto release_stream = [](ArrowArrayStream* stream) {
+    if (stream->release)
+      stream->release(stream);
+  };
+  // Rust consumes the stream on success; release it here on early Status returns.
+  std::unique_ptr<ArrowArrayStream, decltype(release_stream)> stream_owner(&array_stream, release_stream);
 
   auto batch_iterator = std::make_shared<BatchIterator>(schema_, record_batches_);
   ARROW_RETURN_NOT_OK(ExportRecordBatchReader(batch_iterator, &array_stream));
@@ -134,21 +140,21 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   if (!dataset_) {
     try {
       dataset_ = BlockingDataset::OpenUnique(lance_uri, storage_options);
-      origin_fids_ = dataset_->GetAllFragmentIds();
-      dataset_->WriteArrowArrayStream(&array_stream);
+      ARROW_ASSIGN_OR_RAISE(origin_fids_, dataset_->GetAllFragmentIds());
+      ARROW_RETURN_NOT_OK(dataset_->WriteArrowArrayStream(&array_stream));
     } catch (std::exception& e) {
       // dataset does not exist
       origin_fids_.clear();
       dataset_ = BlockingDataset::WriteDataset(lance_uri, &array_stream, storage_options, data_storage_format_);
     }
   } else {
-    dataset_->WriteArrowArrayStream(&array_stream);
+    ARROW_RETURN_NOT_OK(dataset_->WriteArrowArrayStream(&array_stream));
   }
   record_batches_.clear();
 
   std::vector<uint64_t> append_fids;
   std::vector<uint64_t> current_fids;
-  current_fids = dataset_->GetAllFragmentIds();
+  ARROW_ASSIGN_OR_RAISE(current_fids, dataset_->GetAllFragmentIds());
 
   if (current_fids.size() < origin_fids_.size()) {
     return arrow::Status::Invalid(

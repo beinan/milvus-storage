@@ -287,7 +287,7 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
       predicate += std::to_string(deleted_ids[i]);
     }
     predicate += ")";
-    dataset->DeleteRows(predicate);
+    ARROW_RETURN_NOT_OK(dataset->DeleteRows(predicate));
 
     return WriteResult{std::move(result.cgfile), result.schema, num_rows};
   }

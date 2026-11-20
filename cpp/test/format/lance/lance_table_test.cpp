@@ -486,11 +486,12 @@ TEST_F(LanceBasicTest, VersionedFileOpensExploredSnapshot) {
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
   auto latest_dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
-  latest_dataset->DeleteRows("id < 10");
+  ASSERT_STATUS_OK(latest_dataset->DeleteRows("id < 10"));
 
   ASSERT_AND_ASSIGN(auto metadata, LanceTableReader::MetaTrait::load_metadata(first_snapshot_files[0], properties_,
                                                                               nullptr /* key_retriever */));
-  EXPECT_EQ(metadata->payload.dataset->Version(), 1);
+  ASSERT_AND_ASSIGN(auto version, metadata->payload.dataset->Version());
+  EXPECT_EQ(version, 1);
 
   ASSERT_AND_ASSIGN(auto reader, format.create_reader(schema_, first_snapshot_files[0], properties_, {}, nullptr));
   ASSERT_AND_ASSIGN(auto row_groups, reader->get_row_group_infos());
@@ -520,7 +521,8 @@ TEST_F(LanceBasicTest, InvalidDatasetSnapshotVersionIsRejected) {
   file.properties[kDatasetVersionProperty] = "0";
   ASSERT_AND_ASSIGN(auto latest_metadata,
                     LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
-  EXPECT_EQ(latest_metadata->payload.dataset->Version(), 1);
+  ASSERT_AND_ASSIGN(auto version, latest_metadata->payload.dataset->Version());
+  EXPECT_EQ(version, 1);
 }
 
 TEST_F(LanceBasicTest, CachedMetadataValidatesDatasetSnapshotVersion) {
@@ -535,7 +537,8 @@ TEST_F(LanceBasicTest, CachedMetadataValidatesDatasetSnapshotVersion) {
 
   ASSERT_AND_ASSIGN(auto metadata,
                     LanceTableReader::MetaTrait::load_metadata(file, properties_, nullptr /* key_retriever */));
-  EXPECT_EQ(metadata->payload.dataset->Version(), 1);
+  ASSERT_AND_ASSIGN(auto version, metadata->payload.dataset->Version());
+  EXPECT_EQ(version, 1);
 
   ASSERT_AND_ASSIGN(auto legacy_reader,
                     LanceTableReader::MetaTrait::create_from_metadata(metadata, file, schema_, {}, ""));
@@ -782,7 +785,7 @@ TEST_F(LanceBasicTest, TestBasic) {
 
   auto verify_reader = [&]() {
     auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
-    const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
+    ASSERT_AND_ASSIGN(auto fragment_ids, read_dataset->GetAllFragmentIds());
 
     uint64_t total_rows = 0;
     for (const auto& fragment_id : fragment_ids) {
@@ -882,7 +885,7 @@ TEST_F(LanceBasicTest, TestRead) {
 
   auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
 
-  const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
+  ASSERT_AND_ASSIGN(auto fragment_ids, read_dataset->GetAllFragmentIds());
   // The splitting conditions(`WriteParams`) in lance are very strict.
   // So the default setting will only generate one fragment.
   ASSERT_EQ(fragment_ids.size(), 1);
@@ -1043,7 +1046,7 @@ TEST_F(LanceBasicTest, EstimatesAndProjectedReadersShareFileMetadata) {
   ArrowSchema first_schema{};
   ASSERT_STATUS_OK(arrow::ExportSchema(*arrow::schema({fields.front()}), &first_schema));
   auto bridge_reader = BlockingFragmentReader::Open(*dataset, parsed_uri.second, first_schema);
-  auto metadata = bridge_reader->GetFilesMetadata();
+  ASSERT_AND_ASSIGN(auto metadata, bridge_reader->GetFilesMetadata());
   ASSERT_NE(metadata, nullptr);
   dataset->IOStatsIncremental();
   ASSERT_AND_ASSIGN(auto sizes, bridge_reader->EstimateFragmentColumnMemory());
@@ -1055,8 +1058,9 @@ TEST_F(LanceBasicTest, EstimatesAndProjectedReadersShareFileMetadata) {
   EXPECT_EQ(estimate_io.read_iops, 0);
   EXPECT_EQ(estimate_io.read_bytes, 0);
   bridge_reader.reset();
+  ASSERT_AND_ASSIGN(auto dataset_version, dataset->Version());
   auto reopened_dataset =
-      BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), ToStorageOptions(fs_config), dataset->Version());
+      BlockingDataset::Open(ToStandardLanceUri(parsed_uri.first), ToStorageOptions(fs_config), dataset_version);
   dataset.reset();
   reopened_dataset->IOStatsIncremental();
 
@@ -1093,9 +1097,10 @@ TEST_F(LanceBasicTest, ProjectedReadersReuseExternalRowIdsAcrossFragments) {
     ASSERT_STATUS_OK(arrow::ExportRecordBatchReader(batch_reader, &stream));
     auto dataset = BlockingDataset::WriteDataset(uri, &stream, options, LanceDataStorageFormat::V2_1,
                                                  /*enable_stable_row_ids=*/true);
-    ASSERT_EQ(dataset->GetAllFragmentIds().size(), fragment + 1);
+    ASSERT_AND_ASSIGN(auto fragment_ids, dataset->GetAllFragmentIds());
+    ASSERT_EQ(fragment_ids.size(), fragment + 1);
   }
-  BlockingDataset::Open(uri, options)->DeleteRows("id % 16 = 0");
+  ASSERT_STATUS_OK(BlockingDataset::Open(uri, options)->DeleteRows("id % 16 = 0"));
   ASSERT_STATUS_OK(ExternalizeRowIdsForTesting(uri));
   LanceFormat format;
   ASSERT_AND_ASSIGN(auto files, format.explore(base_path_, properties_));
@@ -1162,7 +1167,7 @@ TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, kRows);
   auto dataset = BlockingDataset::Open(lance_uri, storage_options);
-  dataset->DeleteRows("id < 2000");
+  ASSERT_STATUS_OK(dataset->DeleteRows("id < 2000"));
 
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
   LanceTableReader reader(parsed_uri.first, parsed_uri.second, schema, properties_);
@@ -1310,7 +1315,7 @@ TEST_F(LanceBasicTest, LegacyFormatReadsWhenMemoryEstimateIsUnavailable) {
   ASSERT_EQ(cgfile.end_index, kRows);
 
   auto dataset = BlockingDataset::Open(lance_uri, storage_options);
-  auto fragment_ids = dataset->GetAllFragmentIds();
+  ASSERT_AND_ASSIGN(auto fragment_ids, dataset->GetAllFragmentIds());
   ASSERT_EQ(fragment_ids.size(), 1);
   ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
 

@@ -19,6 +19,7 @@
 #include "iceberg_bridge.h"
 #include "source_http_test_support.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
+#include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/filesystem/azure/azurefs.h"
@@ -33,6 +34,7 @@
 #include <random>
 #include <unordered_set>
 #include <arrow/api.h>
+#include <arrow/c/bridge.h>
 #include <arrow/io/memory.h>
 #include <arrow/io/file.h>
 #include <arrow/util/io_util.h>
@@ -414,9 +416,31 @@ TEST(SourceFormatReaderTest, NativeLanceReaderRetainsContextAcrossRenewalAndIsol
     EXPECT_EQ(denied_provider->calls.load(), 1);
     // Another user's denial must not poison this retained reader or its scheduler.
     ASSERT_TRUE(reader->take({0}).ok());
+    // Keep the native metadata handles alive too: their cheap cached accessors
+    // must return typed cancellation, and source datasets must remain read-only.
+    auto metadata = lance::LanceTableReader::MetaTrait::load_metadata_with_context(file, properties, nullptr, context);
+    ASSERT_TRUE(metadata.ok()) << metadata.status();
+    auto dataset = (*metadata)->payload.dataset;
+    auto version = dataset->Version();
+    ASSERT_TRUE(version.ok()) << version.status();
+    EXPECT_EQ(*version, 1);
+    auto fragments = dataset->GetAllFragmentIds();
+    ASSERT_TRUE(fragments.ok()) << fragments.status();
+    ASSERT_FALSE(fragments->empty());
+    ArrowSchema c_schema{};
+    ASSERT_TRUE(arrow::ExportSchema(*schema, &c_schema).ok());
+    auto fragment = lance::BlockingFragmentReader::Open(*dataset, parsed->second, c_schema);
+    ASSERT_TRUE(fragment->RowCount().ok());
+    ASSERT_TRUE(fragment->GetFilesMetadata().ok());
+    ExpectSource(dataset->DeleteRows("value >= 0"), LOON_SOURCE_CREDENTIAL_DENIED);
+    ExpectSource(dataset->WriteArrowArrayStream(nullptr), LOON_SOURCE_CREDENTIAL_DENIED);
     auto pending = reader->take_async({0, 4 * rows_per_round - 1});
     reader.reset();
     context->Cancel();
+    ExpectSource(dataset->Version().status(), LOON_SOURCE_CREDENTIAL_CANCELLED);
+    ExpectSource(dataset->GetAllFragmentIds().status(), LOON_SOURCE_CREDENTIAL_CANCELLED);
+    ExpectSource(fragment->RowCount().status(), LOON_SOURCE_CREDENTIAL_CANCELLED);
+    ExpectSource(fragment->GetFilesMetadata().status(), LOON_SOURCE_CREDENTIAL_CANCELLED);
     ExpectSource(std::move(pending).get().status(), LOON_SOURCE_CREDENTIAL_CANCELLED);
     ExpectSource((*chunk)->get_chunk(0).status(), LOON_SOURCE_CREDENTIAL_CANCELLED);
   }

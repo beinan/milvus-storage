@@ -100,8 +100,31 @@ query, or a fresh multi-hour run of this source-context implementation. Earlier
 local-port-forward attempts failed environmentally before any chunk completed;
 their durations are not combined with these results.
 
-The repository error-handling ratchet is still failing in the existing release
-adaptation: `lance_bridge.cpp` has 27 throw sites against a baseline of 21,
-and `lance_table_reader.cpp` adds four. The test transport adds no production
-throw sites. Do not raise the baseline to accept these; the source-aware
-bridge adaptation needs a separate status-return cleanup before submission.
+## Native Lance status-return adaptation
+
+The release bridge now returns Arrow Status/Result from the source-aware
+factory, guarded cached metadata accessors, and read-only mutation guards.
+Callers propagate those statuses, and the dataset singleflight cache publishes
+failed results before notifying waiters. The four table-reader catches return
+the original Lance status for both source and legacy readers. No source
+credential category is reconstructed from an arbitrary legacy error message.
+The test-only writer releases an unconsumed Arrow stream on early returns.
+
+The full native build passes. All 73 source tests and 27 local Lance tests pass;
+two cloud-only Lance tests skip in local mode (102 selected, 100 passed).
+The retained native Lance fixture additionally checks cached metadata access
+after cancellation and rejects both delete and append through a source dataset.
+Existing real-CXX provider-failure tests cover denial, expiry, transient failure,
+cancellation and invalid response. Factory null-context/cancelled-context
+checks run before any credential fetch. The error-handling ratchet now passes:
+44 total throw sites versus the original baseline 48; the bridge has 17 versus
+21. The baseline was lowered, not raised.
+
+Evidence: `release-source-status-build-v1.log` and
+`release-source-status-tests-v1.{log,xml}` with environment/result JSON in the
+local renewal evidence directory. Existing gcov files produced checksum
+warnings after recompilation; these results claim test assertions, not coverage.
+The frozen real-Azure results above still apply only to `7550d2a`; this follow-up
+has not received a new live-Azure or multi-hour qualification. The engine agent
+owns preparation of the stable delegated-service runtime and its authorization
+checks. The expiring older test pod is not suitable for a new three-hour run.

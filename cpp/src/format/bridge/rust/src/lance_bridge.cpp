@@ -23,12 +23,8 @@
 namespace milvus_storage::lance {
 
 namespace {
-void CheckSource(const SourceReadContextPtr& context) {
-  if (context) {
-    auto status = fs::SourceCredentialArrowStatus(context->CheckState());
-    if (!status.ok())
-      throw LanceException(std::move(status));
-  }
+arrow::Status CheckSource(const SourceReadContextPtr& context) {
+  return context ? fs::SourceCredentialArrowStatus(context->CheckState()) : arrow::Status::OK();
 }
 class SourceBatchReader final : public arrow::RecordBatchReader {
   public:
@@ -73,27 +69,27 @@ std::shared_ptr<arrow::RecordBatchReader> WrapSourceLanceBatchReader(std::shared
   return std::make_shared<SourceBatchReader>(std::move(reader));
 }
 
-std::shared_ptr<BlockingDataset> BlockingDataset::OpenWithContext(const std::string& source_uri,
-                                                                  const std::string& lance_uri,
-                                                                  const StorageOptions& options,
-                                                                  SourceReadContextPtr context,
-                                                                  uint64_t version) {
+arrow::Result<std::shared_ptr<BlockingDataset>> BlockingDataset::OpenWithContext(const std::string& source_uri,
+                                                                                 const std::string& lance_uri,
+                                                                                 const StorageOptions& options,
+                                                                                 SourceReadContextPtr context,
+                                                                                 uint64_t version) {
   if (!context)
-    throw LanceException(fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED));
-  CheckSource(context);
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
+  ARROW_RETURN_NOT_OK(CheckSource(context));
   uint32_t parallelism = 0;
   if (auto it = options.find("lance_io_parallelism"); it != options.end()) {
     auto result = std::from_chars(it->second.data(), it->second.data() + it->second.size(), parallelism);
     if (result.ec != std::errc() || result.ptr != it->second.data() + it->second.size() || parallelism > 256)
-      throw LanceException(arrow::Status::Invalid("Invalid source Lance parallelism"));
+      return arrow::Status::Invalid("Invalid source Lance parallelism");
   }
   try {
     auto bridge = std::make_shared<source_context::ffi::SourceContextBridge>(context);
     auto result = ffi::open_source_dataset(std::move(bridge), source_uri, lance_uri, parallelism, version);
-    CheckSource(context);
+    ARROW_RETURN_NOT_OK(CheckSource(context));
     return std::make_shared<BlockingDataset>(std::move(result), std::move(context));
   } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(SourceLanceBridgeStatus(e.what()));
+    return SourceLanceBridgeStatus(e.what());
   }
 }
 
@@ -124,8 +120,8 @@ uint64_t BlockingDataset::ResolveLatestVersion(const std::string& uri, const Sto
   }
 }
 
-uint64_t BlockingDataset::Version() const {
-  CheckSource(source_context_);
+arrow::Result<uint64_t> BlockingDataset::Version() const {
+  ARROW_RETURN_NOT_OK(CheckSource(source_context_));
   return impl_->version();
 }
 
@@ -158,23 +154,24 @@ std::unique_ptr<BlockingDataset> BlockingDataset::WriteDataset(const std::string
   }
 }
 
-void BlockingDataset::DeleteRows(const std::string& predicate) {
+arrow::Status BlockingDataset::DeleteRows(const std::string& predicate) {
   if (source_context_)
-    throw LanceException(fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED));
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   try {
     ffi::dataset_delete_rows(*impl_, rust::Str(predicate.data(), predicate.length()));
+    return arrow::Status::OK();
   } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(source_context_ ? SourceLanceBridgeStatus(e.what()) : arrow::Status::IOError(e.what()));
+    return source_context_ ? SourceLanceBridgeStatus(e.what()) : arrow::Status::IOError(e.what());
   }
 }
 
-std::vector<uint64_t> BlockingDataset::GetAllFragmentIds() const {
+arrow::Result<std::vector<uint64_t>> BlockingDataset::GetAllFragmentIds() const {
   try {
-    CheckSource(source_context_);
+    ARROW_RETURN_NOT_OK(CheckSource(source_context_));
     auto fragment_ids = impl_->get_all_fragment_ids();
-    return {fragment_ids.begin(), fragment_ids.end()};
+    return std::vector<uint64_t>(fragment_ids.begin(), fragment_ids.end());
   } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(source_context_ ? SourceLanceBridgeStatus(e.what()) : arrow::Status::IOError(e.what()));
+    return source_context_ ? SourceLanceBridgeStatus(e.what()) : arrow::Status::IOError(e.what());
   }
 }
 
@@ -217,13 +214,14 @@ void BlockingDataset::GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_s
   }
 }
 
-void BlockingDataset::WriteArrowArrayStream(struct ArrowArrayStream* stream) {
+arrow::Status BlockingDataset::WriteArrowArrayStream(struct ArrowArrayStream* stream) {
   if (source_context_)
-    throw LanceException(fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED));
+    return fs::SourceCredentialArrowStatus(LOON_SOURCE_CREDENTIAL_DENIED);
   try {
     impl_->write_stream(reinterpret_cast<uint8_t*>(stream));
+    return arrow::Status::OK();
   } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(source_context_ ? SourceLanceBridgeStatus(e.what()) : arrow::Status::IOError(e.what()));
+    return source_context_ ? SourceLanceBridgeStatus(e.what()) : arrow::Status::IOError(e.what());
   }
 }
 
@@ -244,12 +242,12 @@ std::unique_ptr<BlockingFragmentReader> BlockingFragmentReader::Open(const Block
   }
 }
 
-uint64_t BlockingFragmentReader::RowCount() const {
+arrow::Result<uint64_t> BlockingFragmentReader::RowCount() const {
   try {
-    CheckSource(source_context_);
+    ARROW_RETURN_NOT_OK(CheckSource(source_context_));
     return impl_->number_of_rows();
   } catch (const rust::cxxbridge1::Error& e) {
-    throw LanceException(source_context_ ? SourceLanceBridgeStatus(e.what()) : arrow::Status::IOError(e.what()));
+    return source_context_ ? SourceLanceBridgeStatus(e.what()) : arrow::Status::IOError(e.what());
   }
 }
 
@@ -286,9 +284,10 @@ arrow::Result<uint64_t> BlockingFragmentReader::EstimateFragmentMemory() const {
   }
 }
 
-std::shared_ptr<const FragmentFilesMetadata> BlockingFragmentReader::GetFilesMetadata() const {
-  CheckSource(source_context_);
-  return std::make_shared<FragmentFilesMetadata>(impl_->get_files_metadata());
+arrow::Result<std::shared_ptr<const FragmentFilesMetadata>> BlockingFragmentReader::GetFilesMetadata() const {
+  ARROW_RETURN_NOT_OK(CheckSource(source_context_));
+  return std::shared_ptr<const FragmentFilesMetadata>(
+      std::make_shared<FragmentFilesMetadata>(impl_->get_files_metadata()));
 }
 
 void BlockingFragmentReader::TakeAsSingleBatch(const std::vector<int64_t>& indices, ArrowArray& out_array) {
