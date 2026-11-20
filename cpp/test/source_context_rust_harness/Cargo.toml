@@ -11,6 +11,9 @@ chrono = "0.4"
 futures = "0.3"
 iceberg = "=0.9.0"
 iceberg-storage-opendal = { version = "=0.9.0", features = ["opendal-azdls"] }
+arrow-array58 = { package = "arrow-array", version = "58.0.0" }
+arrow-schema58 = { package = "arrow-schema", version = "58.0.0" }
+lance = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999", default-features = false, features = ["azure"] }
 lance-core = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999" }
 lance-io = { git = "https://github.com/zilliztech/lance", rev = "29e34493494a2b9ed6dbde2d5e7b33c367927999", default-features = false, features = ["azure"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

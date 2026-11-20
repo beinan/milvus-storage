@@ -45,3 +45,23 @@ A native constructor probe exposed a panic in LanceStore::new: it consults the g
 Verification: 41 actual native/CXX/OpenDAL harness tests pass (one intentionally ignored exploratory probe), including retained Lance ObjectStore expiry between HEAD/body, escaped keys, cancellation and authority guards. The actual C++ OpenWithContext -> Rust DatasetBuilder -> native issuer probe passes all five source status categories, with retries only for transient failures. This uses supporting legacy native dependencies, not a full native build. Rust test compilation/static library and syntax checks for the three affected C++ files pass. Additional Scan/Take guards compile; full-table/fault tests of these paths remain pending.
 
 The standalone Cargo harness is excluded from the native test glob; the evaluated CMake selection includes 80 normal C++ test files and excludes Cargo-only support code. Native engine build, full Lance dataset reads, original-user authorization, and a fresh complete multi-hour soak remain outstanding. Prior live Rust READ evidence above does not qualify this new Lance implementation.
+
+## Generated Rust Lance dataset qualification
+
+The standalone repository harness now passes 42 tests with one exploratory
+ignore. A real four-chunk Lance dataset is read through the production scoped
+Rust ObjectStore and actual native context. Pinned and latest DatasetBuilder
+modes each retain one dataset across two successful expiry boundaries, storage
+503/429 recovery, a further expired-credential provider outage, and successful
+recovery. Returned values are checked, another context's denial remains isolated,
+and cancellation retains its typed error through the Lance error chain. The
+transport rejects expired SAS and checks separate READ/LIST permissions.
+
+These are generated-data/injected-clock/HTTP tests, not live Azure or the C++
+format/table wrapper. The harness pins the production Lance Git revision with
+its own Cargo lock; full production dependency validation remains separate.
+The failure probe observes 16 provider calls: Lance's outer get retry repeats
+the four-attempt credential batch. Four is not the whole-read budget. Imported
+main C++ table fixtures still require Rust-transport adaptation on 3.0; their
+presence does not establish passing runtime tests. The seven source test C++
+translation units now compile after adapting the release bridge APIs.

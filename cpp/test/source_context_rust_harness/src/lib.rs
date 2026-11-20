@@ -871,3 +871,6 @@ mod source_lance_tests {
         assert_eq!(t.0.lock().unwrap().len(), 1);
     }
 }
+
+#[cfg(test)]
+mod lance_dataset_tests;

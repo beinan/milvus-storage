@@ -82,6 +82,7 @@
     "cpp/test/source_context_rust_harness/bridge.rs",
     "cpp/test/source_context_rust_harness/build.rs",
     "cpp/test/source_context_rust_harness/generated/rust-bridge/lib.h",
+    "cpp/test/source_context_rust_harness/src/lance_dataset_tests.rs",
     "cpp/test/source_context_rust_harness/src/lib.rs",
     "cpp/test/source_context_rust_harness/test_support.cpp",
     "cpp/test/source_context_rust_harness/test_support.h",
@@ -90,8 +91,9 @@
   "unresolved": [],
   "verification_limits": [
     "Full native build pending",
-    "Full Lance dataset/stream fault tests pending",
+    "Full C++ Lance table/stream fault tests pending; Rust DatasetBuilder fixture covered",
     "Engine and original-user soak pending",
-    "Source scheduler is dataset-local; AIMD tuning not adapted"
+    "Source scheduler is dataset-local; AIMD tuning not adapted",
+    "Lance outer retries can repeat credential batches; observed16provider calls for one failed file read"
   ]
 }
