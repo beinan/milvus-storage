@@ -50,3 +50,4 @@ target_include_directories(prsbridge PRIVATE
 )
 
 target_link_libraries(prsbridge PUBLIC rust-bridge)
+target_link_libraries(prsbridge PRIVATE azure-sdk-for-cpp::azure-sdk-for-cpp)
